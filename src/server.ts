@@ -138,6 +138,7 @@ export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyIn
   const r2Client = createR2Client(config.r2);
   const upload = deps.uploadPngToR2 ?? uploadPngToR2;
   const generationLimiter = new ActiveRequestLimiter(config.limits.maxConcurrentGenerations);
+  const imageProcessingLimiter = new ActiveRequestLimiter(config.limits.maxConcurrentImageProcessing);
   const app = Fastify({
     logger: {
       level: config.logLevel,
@@ -150,12 +151,15 @@ export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyIn
   app.get('/healthz', async () => ({
     ok: true,
     active_generations: generationLimiter.active,
-    max_concurrent_generations: generationLimiter.max
+    max_concurrent_generations: generationLimiter.max,
+    active_image_processing: imageProcessingLimiter.active,
+    max_concurrent_image_processing: imageProcessingLimiter.max
   }));
 
   app.post('/v1/images/generations', async (request, reply) => {
     const totalStartedAt = performance.now();
     let releaseGenerationSlot: (() => void) | undefined;
+    let releaseImageProcessingSlot: (() => void) | undefined;
     const timings: Timings = {
       openai_ms: 0,
       decode_ms: 0,
@@ -191,6 +195,15 @@ export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyIn
           statusCode: 502,
           type: 'server_error',
           code: 'empty_upstream_data'
+        });
+      }
+
+      releaseImageProcessingSlot = imageProcessingLimiter.tryAcquire() ?? undefined;
+      if (!releaseImageProcessingSlot) {
+        throw new AppError('Too many images are being processed', {
+          statusCode: 429,
+          type: 'server_error',
+          code: 'too_many_image_processing_requests'
         });
       }
 
@@ -245,6 +258,8 @@ export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyIn
         request_id: request.id,
         active_generations: generationLimiter.active,
         max_concurrent_generations: generationLimiter.max,
+        active_image_processing: imageProcessingLimiter.active,
+        max_concurrent_image_processing: imageProcessingLimiter.max,
         openai_ms: timings.openai_ms,
         decode_ms: timings.decode_ms,
         upload_ms: timings.upload_ms,
@@ -263,6 +278,8 @@ export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyIn
         err: error,
         active_generations: generationLimiter.active,
         max_concurrent_generations: generationLimiter.max,
+        active_image_processing: imageProcessingLimiter.active,
+        max_concurrent_image_processing: imageProcessingLimiter.max,
         openai_ms: timings.openai_ms,
         decode_ms: timings.decode_ms,
         upload_ms: timings.upload_ms,
@@ -276,6 +293,7 @@ export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyIn
 
       return sendAppError(reply, error);
     } finally {
+      releaseImageProcessingSlot?.();
       releaseGenerationSlot?.();
     }
   });

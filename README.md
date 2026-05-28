@@ -24,7 +24,8 @@ Copy `.env.example` to `.env` and fill the secret values:
 
 ```env
 NEW_API_BASE_URL=http://127.0.0.1:3000
-MAX_CONCURRENT_GENERATIONS=50
+MAX_CONCURRENT_GENERATIONS=200
+MAX_CONCURRENT_IMAGE_PROCESSING=50
 R2_ENDPOINT=https://<account-id>.r2.cloudflarestorage.com
 R2_ACCESS_KEY_ID=...
 R2_SECRET_ACCESS_KEY=...
@@ -55,13 +56,18 @@ concurrency cap even on large machines.
 Recommended starting point for a large server:
 
 ```env
-MAX_CONCURRENT_GENERATIONS=50
+MAX_CONCURRENT_GENERATIONS=200
+MAX_CONCURRENT_IMAGE_PROCESSING=50
 PM2_MAX_MEMORY_RESTART=30G
 NODE_MAX_OLD_SPACE_SIZE_MB=24576
 ```
 
-If 4K PNGs are larger than expected, reduce `MAX_CONCURRENT_GENERATIONS`. If the
-server remains mostly idle during load tests, increase it gradually.
+`MAX_CONCURRENT_GENERATIONS` limits total in-flight generation requests, including
+the long wait for new-api/OpenAI. `MAX_CONCURRENT_IMAGE_PROCESSING` limits the
+memory-heavy phase after `b64_json` is returned: decode plus R2 upload.
+
+If 4K PNGs are larger than expected, reduce `MAX_CONCURRENT_IMAGE_PROCESSING`.
+If the server remains mostly idle during load tests, increase it gradually.
 
 ## Local smoke test
 

@@ -7,14 +7,19 @@ import type { AppConfig } from '../src/config.js';
 
 const tinyPngBase64 = 'iVBORw0KGgo=';
 
-function buildTestConfig(baseUrl: string, overrides: Partial<AppConfig> = {}): AppConfig {
-  return {
+type DeepPartial<T> = {
+  [K in keyof T]?: T[K] extends object ? DeepPartial<T[K]> : T[K];
+};
+
+function buildTestConfig(baseUrl: string, overrides: DeepPartial<AppConfig> = {}): AppConfig {
+  const base: AppConfig = {
     port: 0,
     host: '127.0.0.1',
     logLevel: 'silent',
     bodyLimitBytes: 100 * 1024 * 1024,
     limits: {
-      maxConcurrentGenerations: 50
+      maxConcurrentGenerations: 200,
+      maxConcurrentImageProcessing: 50
     },
     upstream: {
       baseUrl,
@@ -33,8 +38,28 @@ function buildTestConfig(baseUrl: string, overrides: Partial<AppConfig> = {}): A
       publicUrl: 'https://img.example.com',
       keyPrefix: 'images',
       cacheControl: 'public, max-age=86400'
+    }
+  };
+
+  return {
+    ...base,
+    ...overrides,
+    limits: {
+      ...base.limits,
+      ...overrides.limits
     },
-    ...overrides
+    upstream: {
+      ...base.upstream,
+      ...overrides.upstream
+    },
+    defaults: {
+      ...base.defaults,
+      ...overrides.defaults
+    },
+    r2: {
+      ...base.r2,
+      ...overrides.r2
+    }
   };
 }
 
@@ -152,6 +177,72 @@ test('POST /v1/images/generations returns 429 when concurrency limit is reached'
   });
   assert.equal(health.json().active_generations, 0);
   assert.equal(health.json().max_concurrent_generations, 1);
+  assert.equal(health.json().active_image_processing, 0);
+
+  await app.close();
+  await upstream.close();
+});
+
+test('POST /v1/images/generations returns 429 when image processing limit is reached', async () => {
+  const upstream = Fastify();
+
+  upstream.post('/v1/images/generations', async () => ({
+    created: 1780000000,
+    data: [
+      {
+        b64_json: tinyPngBase64
+      }
+    ]
+  }));
+
+  await upstream.listen({ port: 0, host: '127.0.0.1' });
+  const upstreamAddress = upstream.server.address();
+  assert.ok(upstreamAddress && typeof upstreamAddress === 'object');
+  const port = (upstreamAddress as AddressInfo).port;
+
+  const app = buildServer(buildTestConfig(`http://127.0.0.1:${port}`, {
+    limits: {
+      maxConcurrentGenerations: 10,
+      maxConcurrentImageProcessing: 1
+    }
+  }), {
+    uploadPngToR2: async ({ key }) => {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      return `https://img.example.com/${key}`;
+    }
+  });
+
+  const request = {
+    method: 'POST' as const,
+    url: '/v1/images/generations',
+    headers: {
+      authorization: 'Bearer test-key',
+      'content-type': 'application/json'
+    },
+    payload: {
+      model: 'gpt-image-2-count',
+      prompt: 'test'
+    }
+  };
+
+  const [first, second] = await Promise.all([
+    app.inject(request),
+    app.inject(request)
+  ]);
+
+  const statusCodes = [first.statusCode, second.statusCode].sort();
+  assert.deepEqual(statusCodes, [200, 429]);
+
+  const rejected = first.statusCode === 429 ? first : second;
+  assert.equal(rejected.json().error.code, 'too_many_image_processing_requests');
+
+  const health = await app.inject({
+    method: 'GET',
+    url: '/healthz'
+  });
+  assert.equal(health.json().active_generations, 0);
+  assert.equal(health.json().active_image_processing, 0);
+  assert.equal(health.json().max_concurrent_image_processing, 1);
 
   await app.close();
   await upstream.close();

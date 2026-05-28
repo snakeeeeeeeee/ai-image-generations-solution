@@ -9,6 +9,7 @@ export interface AppConfig {
   bodyLimitBytes: number;
   limits: {
     maxConcurrentGenerations: number;
+    maxConcurrentImageProcessing: number;
   };
   upstream: {
     baseUrl: string;
@@ -77,7 +78,8 @@ export function loadConfig(): AppConfig {
     logLevel: optionalEnv('LOG_LEVEL', 'info'),
     bodyLimitBytes: parsePositiveInt('REQUEST_BODY_LIMIT_BYTES', DEFAULT_BODY_LIMIT_BYTES),
     limits: {
-      maxConcurrentGenerations: parsePositiveInt('MAX_CONCURRENT_GENERATIONS', 50)
+      maxConcurrentGenerations: parsePositiveInt('MAX_CONCURRENT_GENERATIONS', 200),
+      maxConcurrentImageProcessing: parsePositiveInt('MAX_CONCURRENT_IMAGE_PROCESSING', 50)
     },
     upstream: {
       baseUrl: normalizeBaseUrl(requireEnv('NEW_API_BASE_URL')),
