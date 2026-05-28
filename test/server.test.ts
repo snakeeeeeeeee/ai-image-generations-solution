@@ -41,6 +41,7 @@ function buildTestConfig(baseUrl: string, overrides: DeepPartial<AppConfig> = {}
       cacheControl: 'public, max-age=86400'
     },
     admin: {
+      basePath: '/image-wrapper/admin',
       password: 'admin-pass',
       sessionSecret: 'test-session-secret-at-least-long-enough',
       dbPath: ':memory:',

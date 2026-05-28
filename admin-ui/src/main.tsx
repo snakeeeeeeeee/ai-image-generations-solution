@@ -99,16 +99,19 @@ interface DashboardData {
 
 type AuthState = 'checking' | 'authenticated' | 'anonymous';
 
+const adminBasePath = new URL(import.meta.env.BASE_URL, window.location.origin).pathname.replace(/\/+$/, '');
+const adminPath = (path = '') => `${adminBasePath}${path}`;
+
 function App() {
   const [authState, setAuthState] = useState<AuthState>('checking');
 
   useEffect(() => {
-    fetchJson('/admin/api/summary')
+    fetchJson(adminPath('/api/summary'))
       .then(() => setAuthState('authenticated'))
       .catch(() => setAuthState('anonymous'));
   }, []);
 
-  if (authState === 'checking') {
+  if (authState === 'checking' && !location.pathname.endsWith('/login')) {
     return <LoadingScreen />;
   }
 
@@ -141,14 +144,14 @@ function LoginPage({ onLogin }: { onLogin: () => void }) {
     setError('');
 
     try {
-      await fetchJson('/admin/login', {
+      await fetchJson(adminPath('/login'), {
         method: 'POST',
         headers: {
           'content-type': 'application/json'
         },
         body: JSON.stringify({ password })
       });
-      history.replaceState(null, '', '/admin');
+      history.replaceState(null, '', adminBasePath);
       onLogin();
     } catch {
       setError('密码不正确，请重新输入。');
@@ -197,9 +200,9 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
     setError('');
     try {
       const [summary, requests, errors] = await Promise.all([
-        fetchJson<{ runtime: RuntimeStats; summary: Summary }>('/admin/api/summary'),
-        fetchJson<{ data: RequestRecord[] }>('/admin/api/requests'),
-        fetchJson<{ data: ErrorRecord[] }>('/admin/api/errors')
+        fetchJson<{ runtime: RuntimeStats; summary: Summary }>(adminPath('/api/summary')),
+        fetchJson<{ data: RequestRecord[] }>(adminPath('/api/requests')),
+        fetchJson<{ data: ErrorRecord[] }>(adminPath('/api/errors'))
       ]);
       setData({
         runtime: summary.runtime,
@@ -221,8 +224,8 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
   }, []);
 
   async function logout() {
-    await fetch('/admin/logout', { method: 'POST' });
-    history.replaceState(null, '', '/admin/login');
+    await fetch(adminPath('/logout'), { method: 'POST' });
+    history.replaceState(null, '', adminPath('/login'));
     onLogout();
   }
 

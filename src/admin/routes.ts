@@ -20,17 +20,19 @@ interface LoginBody {
 export function registerAdminRoutes(app: FastifyInstance, options: AdminRoutesOptions): void {
   app.register(cookie);
 
+  const basePath = options.config.basePath;
+  const route = (path = '') => `${basePath}${path}`;
   const adminDist = resolve('dist/admin-ui');
   const adminAssetsDist = join(adminDist, 'assets');
   if (existsSync(adminAssetsDist)) {
     app.register(fastifyStatic, {
       root: adminAssetsDist,
-      prefix: '/admin/assets/',
+      prefix: route('/assets/'),
       decorateReply: false
     });
   }
 
-  app.post('/admin/login', async (request: FastifyRequest<{ Body: LoginBody }>, reply) => {
+  app.post(route('/login'), async (request: FastifyRequest<{ Body: LoginBody }>, reply) => {
     if (!verifyPassword(options.config, request.body?.password)) {
       return reply.status(401).send({
         error: {
@@ -49,37 +51,37 @@ export function registerAdminRoutes(app: FastifyInstance, options: AdminRoutesOp
     return reply.send({ ok: true });
   });
 
-  app.post('/admin/logout', async (_request, reply) => {
+  app.post(route('/logout'), async (_request, reply) => {
     reply.clearCookie(adminCookieName(), {
-      path: '/admin'
+      path: basePath
     });
     return reply.send({ ok: true });
   });
 
-  app.get('/admin/api/summary', {
+  app.get(route('/api/summary'), {
     preHandler: async (request, reply) => requireAdmin(options.config, request, reply)
   }, async () => ({
     runtime: options.getRuntimeStats(),
     summary: options.store.getSummary()
   }));
 
-  app.get('/admin/api/requests', {
+  app.get(route('/api/requests'), {
     preHandler: async (request, reply) => requireAdmin(options.config, request, reply)
   }, async () => ({
     data: options.store.getRecentRequests(options.config.recentLimit)
   }));
 
-  app.get('/admin/api/errors', {
+  app.get(route('/api/errors'), {
     preHandler: async (request, reply) => requireAdmin(options.config, request, reply)
   }, async () => ({
     data: options.store.getErrors()
   }));
 
-  app.get('/admin/login', async (_request, reply) => sendAdminShell(reply, adminDist));
-  app.get('/admin', {
+  app.get(route('/login'), async (_request, reply) => sendAdminShell(reply, adminDist));
+  app.get(basePath, {
     preHandler: async (request, reply) => requireAdmin(options.config, request, reply)
   }, async (_request, reply) => sendAdminShell(reply, adminDist));
-  app.get('/admin/*', {
+  app.get(route('/*'), {
     preHandler: async (request, reply) => requireAdmin(options.config, request, reply)
   }, async (_request, reply) => sendAdminShell(reply, adminDist));
 }
@@ -89,7 +91,7 @@ async function requireAdmin(config: AdminConfig, request: FastifyRequest, reply:
     return;
   }
 
-  if (request.url.startsWith('/admin/api/')) {
+  if (request.url.startsWith(`${config.basePath}/api/`)) {
     await reply.status(401).send({
       error: {
         message: '需要登录',
@@ -99,7 +101,7 @@ async function requireAdmin(config: AdminConfig, request: FastifyRequest, reply:
     return;
   }
 
-  await reply.redirect('/admin/login');
+  await reply.redirect(`${config.basePath}/login`);
 }
 
 function sendAdminShell(reply: FastifyReply, adminDist: string): FastifyReply {

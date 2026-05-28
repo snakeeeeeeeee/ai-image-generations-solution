@@ -54,7 +54,7 @@ export function sessionCookieOptions(config: AdminConfig): {
     httpOnly: true,
     sameSite: 'lax',
     secure: config.cookieSecure,
-    path: '/admin',
+    path: config.basePath,
     maxAge: SESSION_MAX_AGE_SECONDS
   };
 }

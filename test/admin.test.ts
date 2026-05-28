@@ -42,6 +42,7 @@ function buildTestConfig(baseUrl: string, overrides: DeepPartial<AppConfig> = {}
       cacheControl: 'public, max-age=86400'
     },
     admin: {
+      basePath: '/image-wrapper/admin',
       password: 'admin-pass',
       sessionSecret: 'test-session-secret-at-least-long-enough',
       dbPath: ':memory:',
@@ -113,14 +114,14 @@ test('admin login succeeds and protects API routes', async () => {
 
   const unauthenticated = await app.inject({
     method: 'GET',
-    url: '/admin/api/summary'
+    url: '/image-wrapper/admin/api/summary'
   });
   assert.equal(unauthenticated.statusCode, 401);
   assert.equal(unauthenticated.json().error.code, 'admin_auth_required');
 
   const failedLogin = await app.inject({
     method: 'POST',
-    url: '/admin/login',
+    url: '/image-wrapper/admin/login',
     payload: {
       password: 'wrong'
     }
@@ -129,7 +130,7 @@ test('admin login succeeds and protects API routes', async () => {
 
   const login = await app.inject({
     method: 'POST',
-    url: '/admin/login',
+    url: '/image-wrapper/admin/login',
     payload: {
       password: 'admin-pass'
     }
@@ -139,7 +140,7 @@ test('admin login succeeds and protects API routes', async () => {
   const cookie = getCookie(login.headers['set-cookie']);
   const authenticated = await app.inject({
     method: 'GET',
-    url: '/admin/api/summary',
+    url: '/image-wrapper/admin/api/summary',
     headers: {
       cookie
     }

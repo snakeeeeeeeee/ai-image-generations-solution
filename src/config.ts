@@ -71,6 +71,11 @@ function normalizePath(value: string): string {
   return value.startsWith('/') ? value : `/${value}`;
 }
 
+function normalizeBasePath(value: string): string {
+  const normalized = normalizePath(value).replace(/\/+$/, '');
+  return normalized === '' ? '/' : normalized;
+}
+
 function normalizePngFormat(value: string): 'png' {
   const normalized = value.toLowerCase();
   if (normalized !== 'png') {
@@ -109,6 +114,7 @@ export function loadConfig(): AppConfig {
       cacheControl: optionalEnv('R2_CACHE_CONTROL', 'public, max-age=86400')
     },
     admin: {
+      basePath: normalizeBasePath(optionalEnv('ADMIN_BASE_PATH', '/image-wrapper/admin')),
       password: optionalEnv('ADMIN_PASSWORD', ''),
       sessionSecret: optionalEnv('ADMIN_SESSION_SECRET', randomBytes(32).toString('hex')),
       dbPath: optionalEnv('ADMIN_DB_PATH', './data/admin.sqlite'),

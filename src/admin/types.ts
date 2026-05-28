@@ -1,4 +1,5 @@
 export interface AdminConfig {
+  basePath: string;
   password?: string;
   sessionSecret: string;
   dbPath: string;
