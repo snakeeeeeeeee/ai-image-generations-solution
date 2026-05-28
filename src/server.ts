@@ -1,4 +1,5 @@
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
+import multipart from '@fastify/multipart';
 import { performance } from 'node:perf_hooks';
 import { registerAdminRoutes } from './admin/routes.js';
 import { AdminStore } from './admin/store.js';
@@ -27,6 +28,7 @@ interface Timings {
 }
 
 type UploadPngToR2 = typeof uploadPngToR2;
+type ImageOperation = 'generation' | 'edit';
 
 interface MemorySnapshot {
   rss_bytes: number;
@@ -39,6 +41,15 @@ interface MemorySnapshot {
 interface UpstreamFetchResult {
   response: Response;
   stopTimeout: () => void;
+}
+
+interface UpstreamRequestPayload {
+  body: string | FormData;
+  headers: Record<string, string>;
+  metadata: {
+    model?: string;
+    size?: string;
+  };
 }
 
 interface ServerDeps {
@@ -81,6 +92,13 @@ function getRequestMetadata(body: ImageRequestBody | undefined): { model?: strin
   return {
     model: typeof body?.model === 'string' ? body.model : undefined,
     size: typeof body?.size === 'string' ? body.size : undefined
+  };
+}
+
+function getFieldMetadata(fields: Map<string, string>): { model?: string; size?: string } {
+  return {
+    model: fields.get('model'),
+    size: fields.get('size')
   };
 }
 
@@ -135,12 +153,31 @@ function assertMemoryAvailable(config: AppConfig): void {
   });
 }
 
-function upstreamUrl(config: AppConfig): string {
-  return `${config.upstream.baseUrl}${config.upstream.imagesPath}`;
+function upstreamUrl(config: AppConfig, operation: ImageOperation): string {
+  const path = operation === 'generation' ? config.upstream.imagesPath : config.upstream.imageEditsPath;
+  return `${config.upstream.baseUrl}${path}`;
 }
 
 function msSince(startedAt: number): number {
   return Math.round(performance.now() - startedAt);
+}
+
+function formatBeijingTime(unixSeconds: number): string {
+  const date = new Date(unixSeconds * 1000 + 8 * 60 * 60 * 1000);
+  const pad = (value: number) => String(value).padStart(2, '0');
+  return [
+    date.getUTCFullYear(),
+    '-',
+    pad(date.getUTCMonth() + 1),
+    '-',
+    pad(date.getUTCDate()),
+    ' ',
+    pad(date.getUTCHours()),
+    ':',
+    pad(date.getUTCMinutes()),
+    ':',
+    pad(date.getUTCSeconds())
+  ].join('');
 }
 
 async function readUpstreamBody(response: Response): Promise<unknown> {
@@ -178,10 +215,8 @@ async function parseUpstreamResponse(response: Response): Promise<UpstreamImageR
   return responseBody as UpstreamImageResponse;
 }
 
-function copyForwardHeaders(request: FastifyRequest): Record<string, string> {
-  const headers: Record<string, string> = {
-    'content-type': 'application/json'
-  };
+function copyForwardHeaders(request: FastifyRequest, extraHeaders: Record<string, string> = {}): Record<string, string> {
+  const headers: Record<string, string> = { ...extraHeaders };
 
   if (request.headers.authorization) {
     headers.authorization = request.headers.authorization;
@@ -193,20 +228,22 @@ function copyForwardHeaders(request: FastifyRequest): Record<string, string> {
 async function fetchUpstream({
   config,
   request,
-  body
+  operation,
+  payload
 }: {
   config: AppConfig;
   request: FastifyRequest;
-  body: ImageRequestBody;
+  operation: ImageOperation;
+  payload: UpstreamRequestPayload;
 }): Promise<UpstreamFetchResult> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), config.upstream.timeoutMs);
 
   try {
-    const response = await fetch(upstreamUrl(config), {
+    const response = await fetch(upstreamUrl(config, operation), {
       method: 'POST',
-      headers: copyForwardHeaders(request),
-      body: JSON.stringify(body),
+      headers: copyForwardHeaders(request, payload.headers),
+      body: payload.body,
       signal: controller.signal
     });
 
@@ -221,6 +258,88 @@ async function fetchUpstream({
     }
     throw error;
   }
+}
+
+async function buildJsonUpstreamPayload(
+  request: FastifyRequest,
+  config: AppConfig
+): Promise<UpstreamRequestPayload> {
+  const body = applyImageDefaults(request.body, config.defaults);
+  return {
+    body: JSON.stringify(body),
+    headers: {
+      'content-type': 'application/json'
+    },
+    metadata: getRequestMetadata(body)
+  };
+}
+
+async function buildMultipartUpstreamPayload(
+  request: FastifyRequest,
+  config: AppConfig
+): Promise<UpstreamRequestPayload> {
+  const form = new FormData();
+  const fields = new Map<string, string>();
+
+  if (!request.isMultipart()) {
+    throw new AppError('Request body must be JSON or multipart/form-data', {
+      statusCode: 400,
+      type: 'invalid_request_error',
+      code: 'invalid_request_body'
+    });
+  }
+
+  for await (const part of request.parts()) {
+    if (part.type === 'file') {
+      const buffer = await part.toBuffer();
+      if (buffer.length === 0) {
+        throw new AppError('Uploaded image file is empty', {
+          statusCode: 400,
+          type: 'invalid_request_error',
+          code: 'empty_upload_file'
+        });
+      }
+
+      form.append(
+        part.fieldname,
+        new Blob([buffer], { type: part.mimetype || 'application/octet-stream' }),
+        part.filename || 'image.png'
+      );
+      continue;
+    }
+
+    const value = typeof part.value === 'string' ? part.value : String(part.value ?? '');
+    fields.set(part.fieldname, value);
+    form.append(part.fieldname, value);
+  }
+
+  if (!fields.has('size')) {
+    form.append('size', config.defaults.size);
+    fields.set('size', config.defaults.size);
+  }
+  form.set('output_format', config.defaults.outputFormat);
+
+  return {
+    body: form,
+    headers: {},
+    metadata: getFieldMetadata(fields)
+  };
+}
+
+async function buildUpstreamPayload({
+  request,
+  config,
+  operation
+}: {
+  request: FastifyRequest;
+  config: AppConfig;
+  operation: ImageOperation;
+}): Promise<UpstreamRequestPayload> {
+  if (operation === 'generation' || !request.isMultipart()) {
+    return buildJsonUpstreamPayload(request, config);
+  }
+
+  return buildMultipartUpstreamPayload(request, config);
 }
 
 function sendUpstreamError(reply: FastifyReply, error: unknown): FastifyReply | false {
@@ -249,6 +368,13 @@ export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyIn
     },
     bodyLimit: config.bodyLimitBytes,
     requestIdHeader: 'x-request-id'
+  });
+  app.register(multipart, {
+    limits: {
+      fileSize: config.bodyLimitBytes,
+      files: 20,
+      parts: 100
+    }
   });
   const cleanupInterval = setInterval(() => {
     try {
@@ -281,12 +407,16 @@ export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyIn
     memory: getMemorySnapshot(config)
   }));
 
-  app.post('/v1/images/generations', async (request, reply) => {
+  async function handleImageOperation(
+    operation: ImageOperation,
+    request: FastifyRequest,
+    reply: FastifyReply
+  ): Promise<FastifyReply> {
     const totalStartedAt = performance.now();
     let releaseGenerationSlot: (() => void) | undefined;
     let releaseImageProcessingSlot: (() => void) | undefined;
     let stopUpstreamTimeout: (() => void) | undefined;
-    let upstreamBody: ImageRequestBody | undefined;
+    let metadata: { model?: string; size?: string } = {};
     let totalImageBytes = 0;
     let imageCount = 0;
     let imageUrls: string[] = [];
@@ -305,7 +435,6 @@ export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyIn
         });
       }
 
-      upstreamBody = applyImageDefaults(request.body, config.defaults);
       assertMemoryAvailable(config);
       releaseGenerationSlot = generationLimiter.tryAcquire() ?? undefined;
       if (!releaseGenerationSlot) {
@@ -316,8 +445,17 @@ export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyIn
         });
       }
 
+      const upstreamPayload = await buildUpstreamPayload({ request, config, operation });
+      metadata = upstreamPayload.metadata;
+      assertMemoryAvailable(config);
+
       const upstreamStartedAt = performance.now();
-      const upstreamFetch = await fetchUpstream({ config, request, body: upstreamBody });
+      const upstreamFetch = await fetchUpstream({
+        config,
+        request,
+        operation,
+        payload: upstreamPayload
+      });
       stopUpstreamTimeout = upstreamFetch.stopTimeout;
 
       releaseImageProcessingSlot = await imageProcessingLimiter.acquire();
@@ -385,6 +523,7 @@ export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyIn
       const totalMs = msSince(totalStartedAt);
       request.log.info({
         request_id: request.id,
+        operation,
         active_generations: generationLimiter.active,
         queued_generations: generationLimiter.queued,
         max_concurrent_generations: generationLimiter.max,
@@ -398,14 +537,15 @@ export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyIn
         total_ms: totalMs,
         image_bytes: totalImageBytes,
         image_count: imageCount
-      }, 'image generation wrapped');
+      }, 'image operation wrapped');
 
       recordAdminRequest(adminStore, {
         requestId: request.id,
         createdAt: new Date().toISOString(),
+        operation,
         statusCode: 200,
         success: true,
-        ...getRequestMetadata(upstreamBody),
+        ...metadata,
         totalMs,
         openaiMs: timings.openai_ms,
         decodeMs: timings.decode_ms,
@@ -415,14 +555,17 @@ export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyIn
         imageUrls
       }, request);
 
+      const created = upstreamResponse.created || Math.floor(Date.now() / 1000);
       return reply.send({
-        created: upstreamResponse.created || Math.floor(Date.now() / 1000),
+        created,
+        created_at_beijing: formatBeijingTime(created),
         data: outputData
       });
     } catch (error) {
       const totalMs = msSince(totalStartedAt);
       request.log.error({
         request_id: request.id,
+        operation,
         err: error,
         active_generations: generationLimiter.active,
         queued_generations: generationLimiter.queued,
@@ -435,16 +578,17 @@ export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyIn
         decode_ms: timings.decode_ms,
         upload_ms: timings.upload_ms,
         total_ms: totalMs
-      }, 'image generation failed');
+      }, 'image operation failed');
 
       const upstreamReply = sendUpstreamError(reply, error);
       if (upstreamReply) {
         recordAdminRequest(adminStore, {
           requestId: request.id,
           createdAt: new Date().toISOString(),
+          operation,
           statusCode: error instanceof AppError ? error.statusCode : 500,
           success: false,
-          ...getRequestMetadata(upstreamBody),
+          ...metadata,
           totalMs,
           openaiMs: timings.openai_ms,
           decodeMs: timings.decode_ms,
@@ -460,9 +604,10 @@ export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyIn
       recordAdminRequest(adminStore, {
         requestId: request.id,
         createdAt: new Date().toISOString(),
+        operation,
         statusCode: getAppErrorStatus(error),
         success: false,
-        ...getRequestMetadata(upstreamBody),
+        ...metadata,
         totalMs,
         openaiMs: timings.openai_ms,
         decodeMs: timings.decode_ms,
@@ -479,7 +624,10 @@ export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyIn
       releaseImageProcessingSlot?.();
       releaseGenerationSlot?.();
     }
-  });
+  }
+
+  app.post('/v1/images/generations', async (request, reply) => handleImageOperation('generation', request, reply));
+  app.post('/v1/images/edits', async (request, reply) => handleImageOperation('edit', request, reply));
 
   return app;
 }

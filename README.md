@@ -2,9 +2,10 @@
 
 TypeScript OpenAI-compatible image generation wrapper for new-api.
 
-The service accepts `POST /v1/images/generations`, forwards the caller's
-`Authorization` header to new-api, uploads returned `b64_json` PNG images to
-Cloudflare R2, and returns public image URLs instead of base64 JSON.
+The service accepts `POST /v1/images/generations` and
+`POST /v1/images/edits`, forwards the caller's `Authorization` header to
+new-api, uploads returned `b64_json` PNG images to Cloudflare R2, and returns
+public image URLs instead of base64 JSON.
 
 ## Flow
 
@@ -24,6 +25,8 @@ Copy `.env.example` to `.env` and fill the secret values:
 
 ```env
 NEW_API_BASE_URL=http://127.0.0.1:3000
+NEW_API_IMAGES_PATH=/v1/images/generations
+NEW_API_IMAGES_EDITS_PATH=/v1/images/edits
 MAX_CONCURRENT_GENERATIONS=1000
 MAX_CONCURRENT_IMAGE_PROCESSING=50
 MAX_PROCESS_RSS_MB=28672
@@ -149,6 +152,35 @@ curl http://127.0.0.1:8787/v1/images/generations \
   }'
 ```
 
+Image edit request with native multipart parameters:
+
+```bash
+curl http://127.0.0.1:8787/v1/images/edits \
+  -H 'Authorization: Bearer NEW_API_KEY' \
+  -F 'model=gpt-image-2-count' \
+  -F 'prompt=replace the sky with a clean sunset' \
+  -F 'image=@./input.png' \
+  -F 'size=2560x1440'
+```
+
+Image edit request with JSON image URLs:
+
+```bash
+curl http://127.0.0.1:8787/v1/images/edits \
+  -H 'Authorization: Bearer NEW_API_KEY' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "gpt-image-2-count",
+    "prompt": "replace the sky with a clean sunset",
+    "image": [
+      {
+        "image_url": "https://example.com/input.png"
+      }
+    ],
+    "size": "2560x1440"
+  }'
+```
+
 Response:
 
 ```json
@@ -192,8 +224,9 @@ after every restart. The login uses an HttpOnly cookie scoped to
 `ADMIN_BASE_PATH`.
 
 The dashboard stores recent request metrics in SQLite for troubleshooting:
-status, timings, model, image size, error code, and returned image URLs. It does
-not store prompts, Authorization headers, R2 secrets, or new-api keys.
+operation type, status, timings, model, image size, error code, and returned
+image URLs. It does not store prompts, uploaded source images, masks,
+Authorization headers, R2 secrets, or new-api keys.
 
 Dashboard APIs:
 

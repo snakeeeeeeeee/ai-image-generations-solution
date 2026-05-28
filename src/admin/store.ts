@@ -6,6 +6,7 @@ import type { ImageRequestRecord } from './types.js';
 interface RequestRow {
   request_id: string;
   created_at: string;
+  operation: 'generation' | 'edit';
   status_code: number;
   success: 0 | 1;
   model: string | null;
@@ -46,6 +47,7 @@ export class AdminStore {
       CREATE TABLE IF NOT EXISTS image_requests (
         request_id TEXT PRIMARY KEY,
         created_at TEXT NOT NULL,
+        operation TEXT NOT NULL DEFAULT 'generation',
         status_code INTEGER NOT NULL,
         success INTEGER NOT NULL,
         model TEXT,
@@ -66,6 +68,17 @@ export class AdminStore {
       CREATE INDEX IF NOT EXISTS idx_image_requests_error_code
         ON image_requests(error_code);
     `);
+
+    this.#ensureColumn('image_requests', 'operation', "TEXT NOT NULL DEFAULT 'generation'");
+  }
+
+  #ensureColumn(table: string, column: string, definition: string): void {
+    const columns = this.#db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+    if (columns.some((item) => item.name === column)) {
+      return;
+    }
+
+    this.#db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
   }
 
   recordRequest(record: ImageRequestRecord): void {
@@ -73,6 +86,7 @@ export class AdminStore {
       INSERT OR REPLACE INTO image_requests (
         request_id,
         created_at,
+        operation,
         status_code,
         success,
         model,
@@ -88,6 +102,7 @@ export class AdminStore {
       ) VALUES (
         @request_id,
         @created_at,
+        @operation,
         @status_code,
         @success,
         @model,
@@ -104,6 +119,7 @@ export class AdminStore {
     `).run({
       request_id: record.requestId,
       created_at: record.createdAt,
+      operation: record.operation,
       status_code: record.statusCode,
       success: record.success ? 1 : 0,
       model: record.model ?? null,
@@ -275,6 +291,7 @@ function mapRow(row: RequestRow): ImageRequestRecord {
   return {
     requestId: row.request_id,
     createdAt: row.created_at,
+    operation: row.operation === 'edit' ? 'edit' : 'generation',
     statusCode: row.status_code,
     success: row.success === 1,
     model: row.model ?? undefined,

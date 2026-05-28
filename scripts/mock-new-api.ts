@@ -30,6 +30,23 @@ app.post('/v1/images/generations', async (request) => {
   };
 });
 
+app.post('/v1/images/edits', async (request) => {
+  request.log.info({
+    authorization_present: Boolean(request.headers.authorization),
+    content_type: request.headers['content-type'],
+    body: request.body
+  }, 'mock new-api received image edit request');
+
+  return {
+    created: Math.floor(Date.now() / 1000),
+    data: [
+      {
+        b64_json: tinyPngBase64
+      }
+    ]
+  };
+});
+
 await app.listen({
   host,
   port

@@ -11,6 +11,7 @@ export interface AdminConfig {
 export interface ImageRequestRecord {
   requestId: string;
   createdAt: string;
+  operation: 'generation' | 'edit';
   statusCode: number;
   success: boolean;
   model?: string;

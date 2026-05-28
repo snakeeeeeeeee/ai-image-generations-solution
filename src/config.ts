@@ -17,6 +17,7 @@ export interface AppConfig {
   upstream: {
     baseUrl: string;
     imagesPath: string;
+    imageEditsPath: string;
     timeoutMs: number;
   };
   defaults: {
@@ -98,6 +99,7 @@ export function loadConfig(): AppConfig {
     upstream: {
       baseUrl: normalizeBaseUrl(requireEnv('NEW_API_BASE_URL')),
       imagesPath: normalizePath(optionalEnv('NEW_API_IMAGES_PATH', '/v1/images/generations')),
+      imageEditsPath: normalizePath(optionalEnv('NEW_API_IMAGES_EDITS_PATH', '/v1/images/edits')),
       timeoutMs: parsePositiveInt('UPSTREAM_TIMEOUT_MS', 30 * 60 * 1000)
     },
     defaults: {

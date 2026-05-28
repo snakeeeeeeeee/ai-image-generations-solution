@@ -25,6 +25,7 @@ function buildTestConfig(baseUrl: string, overrides: DeepPartial<AppConfig> = {}
     upstream: {
       baseUrl,
       imagesPath: '/v1/images/generations',
+      imageEditsPath: '/v1/images/edits',
       timeoutMs: 5000
     },
     defaults: {
@@ -125,8 +126,146 @@ test('POST /v1/images/generations uploads image and returns URL', async () => {
   assert.equal(upstreamRequestBody?.size, '2560x1440');
   assert.equal(upstreamRequestBody?.output_format, 'png');
 
-  const body = response.json() as { created: number; data: Array<{ url: string }> };
+  const body = response.json() as { created: number; created_at_beijing: string; data: Array<{ url: string }> };
   assert.equal(body.created, 1780000000);
+  assert.equal(body.created_at_beijing, '2026-05-29 04:26:40');
+  assert.match(body.data[0]?.url ?? '', /^https:\/\/img\.example\.com\/images\/\d{4}\/\d{2}\/\d{2}\/.+\.png$/);
+
+  await app.close();
+  await upstream.close();
+});
+
+test('POST /v1/images/edits forwards JSON image edit request and returns URL', async () => {
+  const upstream = Fastify();
+  let upstreamRequestBody: Record<string, unknown> | undefined;
+  let upstreamAuth: string | undefined;
+
+  upstream.post('/v1/images/edits', async (request) => {
+    upstreamRequestBody = request.body as Record<string, unknown>;
+    upstreamAuth = request.headers.authorization;
+    return {
+      created: 1780000000,
+      data: [
+        {
+          b64_json: tinyPngBase64
+        }
+      ]
+    };
+  });
+
+  await upstream.listen({ port: 0, host: '127.0.0.1' });
+  const upstreamAddress = upstream.server.address();
+  assert.ok(upstreamAddress && typeof upstreamAddress === 'object');
+  const port = (upstreamAddress as AddressInfo).port;
+
+  const app = buildServer(buildTestConfig(`http://127.0.0.1:${port}`), {
+    uploadPngToR2: async ({ key }) => `https://img.example.com/${key}`
+  });
+
+  const response = await app.inject({
+    method: 'POST',
+    url: '/v1/images/edits',
+    headers: {
+      authorization: 'Bearer test-key',
+      'content-type': 'application/json'
+    },
+    payload: {
+      model: 'gpt-image-2-count',
+      prompt: 'edit test',
+      image: [
+        {
+          image_url: 'https://example.com/input.png'
+        }
+      ],
+      output_format: 'webp'
+    }
+  });
+
+  assert.equal(response.statusCode, 200);
+  assert.equal(upstreamAuth, 'Bearer test-key');
+  assert.equal(upstreamRequestBody?.size, '2560x1440');
+  assert.equal(upstreamRequestBody?.output_format, 'png');
+  assert.deepEqual(upstreamRequestBody?.image, [{ image_url: 'https://example.com/input.png' }]);
+
+  const body = response.json() as { data: Array<{ url: string }> };
+  assert.match(body.data[0]?.url ?? '', /^https:\/\/img\.example\.com\/images\/\d{4}\/\d{2}\/\d{2}\/.+\.png$/);
+
+  await app.close();
+  await upstream.close();
+});
+
+test('POST /v1/images/edits forwards multipart image edit request and returns URL', async () => {
+  const upstream = Fastify();
+  let upstreamAuth: string | undefined;
+  let upstreamContentType: string | undefined;
+  const received: Record<string, unknown> = {};
+
+  await upstream.register((await import('@fastify/multipart')).default);
+  upstream.post('/v1/images/edits', async (request) => {
+    upstreamAuth = request.headers.authorization;
+    upstreamContentType = request.headers['content-type'];
+    for await (const part of request.parts()) {
+      if (part.type === 'file') {
+        received[part.fieldname] = {
+          filename: part.filename,
+          mimetype: part.mimetype,
+          bytes: (await part.toBuffer()).length
+        };
+      } else {
+        received[part.fieldname] = part.value;
+      }
+    }
+
+    return {
+      created: 1780000000,
+      data: [
+        {
+          b64_json: tinyPngBase64
+        }
+      ]
+    };
+  });
+
+  await upstream.listen({ port: 0, host: '127.0.0.1' });
+  const upstreamAddress = upstream.server.address();
+  assert.ok(upstreamAddress && typeof upstreamAddress === 'object');
+  const port = (upstreamAddress as AddressInfo).port;
+
+  const app = buildServer(buildTestConfig(`http://127.0.0.1:${port}`), {
+    uploadPngToR2: async ({ key }) => `https://img.example.com/${key}`
+  });
+  await app.listen({ port: 0, host: '127.0.0.1' });
+  const appAddress = app.server.address();
+  assert.ok(appAddress && typeof appAddress === 'object');
+  const appPort = (appAddress as AddressInfo).port;
+
+  const form = new FormData();
+  form.append('model', 'gpt-image-2-count');
+  form.append('prompt', 'edit test');
+  form.append('image', new Blob([Buffer.from('input-image')], { type: 'image/png' }), 'input.png');
+
+  const response = await fetch(`http://127.0.0.1:${appPort}/v1/images/edits`, {
+    method: 'POST',
+    headers: {
+      authorization: 'Bearer test-key'
+    },
+    body: form
+  });
+
+  assert.equal(response.status, 200);
+  assert.equal(upstreamAuth, 'Bearer test-key');
+  assert.match(upstreamContentType ?? '', /^multipart\/form-data; boundary=/);
+  assert.deepEqual(received.image, {
+    filename: 'input.png',
+    mimetype: 'image/png',
+    bytes: 11
+  });
+  assert.equal(received.model, 'gpt-image-2-count');
+  assert.equal(received.prompt, 'edit test');
+  assert.equal(received.size, '2560x1440');
+  assert.equal(received.output_format, 'png');
+
+  const body = await response.json() as { data: Array<{ url: string }> };
   assert.match(body.data[0]?.url ?? '', /^https:\/\/img\.example\.com\/images\/\d{4}\/\d{2}\/\d{2}\/.+\.png$/);
 
   await app.close();

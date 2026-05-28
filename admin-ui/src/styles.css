@@ -477,6 +477,11 @@ th {
   color: var(--danger-text);
 }
 
+.status-pill.neutral {
+  background: var(--surface-muted);
+  color: var(--text-soft);
+}
+
 .icon-button {
   width: 32px;
   height: 32px;

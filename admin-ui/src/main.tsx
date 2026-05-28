@@ -70,6 +70,7 @@ interface Summary {
 interface RequestRecord {
   requestId: string;
   createdAt: string;
+  operation: 'generation' | 'edit';
   statusCode: number;
   success: boolean;
   model?: string;
@@ -505,6 +506,7 @@ function ImageTable({ page, onPageChange }: { page: PaginatedRecords; onPageChan
           <thead>
             <tr>
               <th>时间</th>
+              <th>类型</th>
               <th>状态</th>
               <th>模型</th>
               <th>尺寸</th>
@@ -516,11 +518,14 @@ function ImageTable({ page, onPageChange }: { page: PaginatedRecords; onPageChan
           <tbody>
             {page.data.length === 0 ? (
               <tr>
-                <td colSpan={7} className="table-empty">暂无图片记录</td>
+                <td colSpan={8} className="table-empty">暂无图片记录</td>
               </tr>
             ) : page.data.map((request) => (
               <tr key={request.requestId}>
                 <td>{formatDate(request.createdAt)}</td>
+                <td>
+                  <span className="status-pill neutral">{operationLabel(request.operation)}</span>
+                </td>
                 <td>
                   <span className="status-pill ok">
                     <CheckCircle2 size={13} />
@@ -565,6 +570,7 @@ function RequestTable({ page, onPageChange }: { page: PaginatedRecords; onPageCh
           <thead>
             <tr>
               <th>时间</th>
+              <th>类型</th>
               <th>状态</th>
               <th>模型</th>
               <th>尺寸</th>
@@ -580,11 +586,14 @@ function RequestTable({ page, onPageChange }: { page: PaginatedRecords; onPageCh
           <tbody>
             {page.data.length === 0 ? (
               <tr>
-                <td colSpan={11} className="table-empty">暂无请求记录</td>
+                <td colSpan={12} className="table-empty">暂无请求记录</td>
               </tr>
             ) : page.data.map((request) => (
               <tr key={request.requestId}>
                 <td>{formatDate(request.createdAt)}</td>
+                <td>
+                  <span className="status-pill neutral">{operationLabel(request.operation)}</span>
+                </td>
                 <td>
                   <span className={`status-pill ${request.success ? 'ok' : 'bad'}`}>
                     {request.success ? <CheckCircle2 size={13} /> : <XCircle size={13} />}
@@ -681,6 +690,10 @@ function formatDate(value: string): string {
     minute: '2-digit',
     second: '2-digit'
   }).format(new Date(value));
+}
+
+function operationLabel(operation: RequestRecord['operation']): string {
+  return operation === 'edit' ? '图生图' : '文生图';
 }
 
 function percent(value: number, total: number): number {

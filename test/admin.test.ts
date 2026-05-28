@@ -26,6 +26,7 @@ function buildTestConfig(baseUrl: string, overrides: DeepPartial<AppConfig> = {}
     upstream: {
       baseUrl,
       imagesPath: '/v1/images/generations',
+      imageEditsPath: '/v1/images/edits',
       timeoutMs: 5000
     },
     defaults: {
@@ -82,6 +83,15 @@ async function buildUpstream(): Promise<{ baseUrl: string; close: () => Promise<
   const upstream = Fastify();
 
   upstream.post('/v1/images/generations', async () => ({
+    created: 1780000000,
+    data: [
+      {
+        b64_json: tinyPngBase64
+      }
+    ]
+  }));
+
+  upstream.post('/v1/images/edits', async () => ({
     created: 1780000000,
     data: [
       {
@@ -177,6 +187,7 @@ test('successful image requests are recorded without prompt or authorization', a
   const records = store.getRecentRequests(10);
   assert.equal(records.length, 1);
   assert.equal(records[0]?.success, true);
+  assert.equal(records[0]?.operation, 'generation');
   assert.equal(records[0]?.model, 'gpt-image-2-count');
   assert.equal(records[0]?.size, '2560x1440');
   assert.equal(records[0]?.imageCount, 1);
@@ -203,7 +214,7 @@ test('admin request and image APIs return paginated records', async () => {
   });
   const cookie = getCookie(login.headers['set-cookie']);
 
-  await app.inject({
+  const generationResponse = await app.inject({
     method: 'POST',
     url: '/v1/images/generations',
     headers: {
@@ -215,9 +226,11 @@ test('admin request and image APIs return paginated records', async () => {
       size: '2560x1440'
     }
   });
-  await app.inject({
+  assert.equal(generationResponse.statusCode, 200);
+
+  const editResponse = await app.inject({
     method: 'POST',
-    url: '/v1/images/generations',
+    url: '/v1/images/edits',
     headers: {
       authorization: 'Bearer secret-new-api-key'
     },
@@ -227,6 +240,7 @@ test('admin request and image APIs return paginated records', async () => {
       size: '3840x2160'
     }
   });
+  assert.equal(editResponse.statusCode, 200);
 
   const requests = await app.inject({
     method: 'GET',
@@ -241,6 +255,7 @@ test('admin request and image APIs return paginated records', async () => {
   assert.equal(requests.json().pageSize, 1);
   assert.equal(requests.json().total, 2);
   assert.equal(requests.json().totalPages, 2);
+  assert.equal(['generation', 'edit'].includes(requests.json().data[0].operation), true);
 
   const images = await app.inject({
     method: 'GET',
@@ -252,6 +267,7 @@ test('admin request and image APIs return paginated records', async () => {
   assert.equal(images.statusCode, 200);
   assert.equal(images.json().data.length, 2);
   assert.equal(images.json().total, 2);
+  assert.equal(['generation', 'edit'].includes(images.json().data[0].operation), true);
   assert.match(images.json().data[0].imageUrls[0] ?? '', /^https:\/\/img\.example\.com\/images\//);
 
   await app.close();
@@ -331,6 +347,7 @@ test('admin store cleanup removes records older than retention window', () => {
   store.recordRequest({
     requestId: 'old',
     createdAt: new Date(Date.now() - 9 * 24 * 60 * 60 * 1000).toISOString(),
+    operation: 'generation',
     statusCode: 200,
     success: true,
     totalMs: 1,
@@ -344,6 +361,7 @@ test('admin store cleanup removes records older than retention window', () => {
   store.recordRequest({
     requestId: 'new',
     createdAt: new Date().toISOString(),
+    operation: 'edit',
     statusCode: 200,
     success: true,
     totalMs: 1,
@@ -359,5 +377,6 @@ test('admin store cleanup removes records older than retention window', () => {
   const records = store.getRecentRequests(10);
   assert.equal(records.length, 1);
   assert.equal(records[0]?.requestId, 'new');
+  assert.equal(records[0]?.operation, 'edit');
   store.close();
 });
