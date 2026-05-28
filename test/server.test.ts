@@ -18,7 +18,7 @@ function buildTestConfig(baseUrl: string, overrides: DeepPartial<AppConfig> = {}
     logLevel: 'silent',
     bodyLimitBytes: 100 * 1024 * 1024,
     limits: {
-      maxConcurrentGenerations: 200,
+      maxConcurrentGenerations: 1000,
       maxConcurrentImageProcessing: 50
     },
     upstream: {
@@ -183,7 +183,7 @@ test('POST /v1/images/generations returns 429 when concurrency limit is reached'
   await upstream.close();
 });
 
-test('POST /v1/images/generations returns 429 when image processing limit is reached', async () => {
+test('POST /v1/images/generations queues when image processing limit is reached', async () => {
   const upstream = Fastify();
 
   upstream.post('/v1/images/generations', async () => ({
@@ -230,11 +230,8 @@ test('POST /v1/images/generations returns 429 when image processing limit is rea
     app.inject(request)
   ]);
 
-  const statusCodes = [first.statusCode, second.statusCode].sort();
-  assert.deepEqual(statusCodes, [200, 429]);
-
-  const rejected = first.statusCode === 429 ? first : second;
-  assert.equal(rejected.json().error.code, 'too_many_image_processing_requests');
+  assert.equal(first.statusCode, 200);
+  assert.equal(second.statusCode, 200);
 
   const health = await app.inject({
     method: 'GET',

@@ -78,7 +78,7 @@ export function loadConfig(): AppConfig {
     logLevel: optionalEnv('LOG_LEVEL', 'info'),
     bodyLimitBytes: parsePositiveInt('REQUEST_BODY_LIMIT_BYTES', DEFAULT_BODY_LIMIT_BYTES),
     limits: {
-      maxConcurrentGenerations: parsePositiveInt('MAX_CONCURRENT_GENERATIONS', 200),
+      maxConcurrentGenerations: parsePositiveInt('MAX_CONCURRENT_GENERATIONS', 1000),
       maxConcurrentImageProcessing: parsePositiveInt('MAX_CONCURRENT_IMAGE_PROCESSING', 50)
     },
     upstream: {

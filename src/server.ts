@@ -63,6 +63,20 @@ async function readUpstreamBody(response: Response): Promise<unknown> {
   }
 }
 
+async function parseUpstreamResponse(response: Response): Promise<UpstreamImageResponse> {
+  const responseBody = await readUpstreamBody(response);
+  if (!response.ok) {
+    throw new AppError('new-api returned an error', {
+      statusCode: response.status,
+      type: 'upstream_error',
+      code: 'new_api_error',
+      cause: responseBody
+    });
+  }
+
+  return responseBody as UpstreamImageResponse;
+}
+
 function copyForwardHeaders(request: FastifyRequest): Record<string, string> {
   const headers: Record<string, string> = {
     'content-type': 'application/json'
@@ -75,7 +89,7 @@ function copyForwardHeaders(request: FastifyRequest): Record<string, string> {
   return headers;
 }
 
-async function callUpstream({
+async function fetchUpstream({
   config,
   request,
   body
@@ -83,29 +97,17 @@ async function callUpstream({
   config: AppConfig;
   request: FastifyRequest;
   body: ImageRequestBody;
-}): Promise<UpstreamImageResponse> {
+}): Promise<Response> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), config.upstream.timeoutMs);
 
   try {
-    const response = await fetch(upstreamUrl(config), {
+    return await fetch(upstreamUrl(config), {
       method: 'POST',
       headers: copyForwardHeaders(request),
       body: JSON.stringify(body),
       signal: controller.signal
     });
-
-    const responseBody = await readUpstreamBody(response);
-    if (!response.ok) {
-      throw new AppError('new-api returned an error', {
-        statusCode: response.status,
-        type: 'upstream_error',
-        code: 'new_api_error',
-        cause: responseBody
-      });
-    }
-
-    return responseBody as UpstreamImageResponse;
   } catch (error) {
     if (error instanceof Error && error.name === 'AbortError') {
       throw new AppError('new-api image generation timed out', {
@@ -151,8 +153,10 @@ export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyIn
   app.get('/healthz', async () => ({
     ok: true,
     active_generations: generationLimiter.active,
+    queued_generations: generationLimiter.queued,
     max_concurrent_generations: generationLimiter.max,
     active_image_processing: imageProcessingLimiter.active,
+    queued_image_processing: imageProcessingLimiter.queued,
     max_concurrent_image_processing: imageProcessingLimiter.max
   }));
 
@@ -186,9 +190,14 @@ export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyIn
       }
 
       const upstreamStartedAt = performance.now();
-      const upstreamResponse = await callUpstream({ config, request, body: upstreamBody });
+      const upstreamRawResponse = await fetchUpstream({ config, request, body: upstreamBody });
+
+      releaseImageProcessingSlot = await imageProcessingLimiter.acquire();
+      const upstreamResponse = await parseUpstreamResponse(upstreamRawResponse);
       timings.openai_ms = msSince(upstreamStartedAt);
 
+      const outputData: Array<{ url: string }> = [];
+      let totalImageBytes = 0;
       const data = Array.isArray(upstreamResponse.data) ? upstreamResponse.data : [];
       if (data.length === 0) {
         throw new AppError('new-api returned no image data', {
@@ -197,18 +206,6 @@ export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyIn
           code: 'empty_upstream_data'
         });
       }
-
-      releaseImageProcessingSlot = imageProcessingLimiter.tryAcquire() ?? undefined;
-      if (!releaseImageProcessingSlot) {
-        throw new AppError('Too many images are being processed', {
-          statusCode: 429,
-          type: 'server_error',
-          code: 'too_many_image_processing_requests'
-        });
-      }
-
-      const outputData: Array<{ url: string }> = [];
-      let totalImageBytes = 0;
 
       for (const item of data) {
         if (!item.b64_json) {
@@ -257,8 +254,10 @@ export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyIn
       request.log.info({
         request_id: request.id,
         active_generations: generationLimiter.active,
+        queued_generations: generationLimiter.queued,
         max_concurrent_generations: generationLimiter.max,
         active_image_processing: imageProcessingLimiter.active,
+        queued_image_processing: imageProcessingLimiter.queued,
         max_concurrent_image_processing: imageProcessingLimiter.max,
         openai_ms: timings.openai_ms,
         decode_ms: timings.decode_ms,
@@ -277,8 +276,10 @@ export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyIn
         request_id: request.id,
         err: error,
         active_generations: generationLimiter.active,
+        queued_generations: generationLimiter.queued,
         max_concurrent_generations: generationLimiter.max,
         active_image_processing: imageProcessingLimiter.active,
+        queued_image_processing: imageProcessingLimiter.queued,
         max_concurrent_image_processing: imageProcessingLimiter.max,
         openai_ms: timings.openai_ms,
         decode_ms: timings.decode_ms,

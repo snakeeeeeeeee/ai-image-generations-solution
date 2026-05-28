@@ -24,7 +24,7 @@ Copy `.env.example` to `.env` and fill the secret values:
 
 ```env
 NEW_API_BASE_URL=http://127.0.0.1:3000
-MAX_CONCURRENT_GENERATIONS=200
+MAX_CONCURRENT_GENERATIONS=1000
 MAX_CONCURRENT_IMAGE_PROCESSING=50
 R2_ENDPOINT=https://<account-id>.r2.cloudflarestorage.com
 R2_ACCESS_KEY_ID=...
@@ -56,7 +56,7 @@ concurrency cap even on large machines.
 Recommended starting point for a large server:
 
 ```env
-MAX_CONCURRENT_GENERATIONS=200
+MAX_CONCURRENT_GENERATIONS=1000
 MAX_CONCURRENT_IMAGE_PROCESSING=50
 PM2_MAX_MEMORY_RESTART=30G
 NODE_MAX_OLD_SPACE_SIZE_MB=24576
