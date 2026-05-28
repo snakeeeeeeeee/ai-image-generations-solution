@@ -534,7 +534,49 @@ th {
 
 .pagination-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
+  justify-content: flex-end;
+  align-items: center;
+}
+
+.page-size-select,
+.page-jump-form {
+  min-height: 42px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--text-muted);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.page-size-select select,
+.page-jump-form input {
+  height: 36px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--surface-solid);
+  color: var(--text);
+  font: inherit;
+  font-weight: 800;
+  outline: none;
+}
+
+.page-size-select select {
+  min-width: 92px;
+  padding: 0 8px;
+}
+
+.page-jump-form input {
+  width: 72px;
+  padding: 0 10px;
+}
+
+.page-size-select select:focus,
+.page-jump-form input:focus {
+  border-color: #2563eb;
+  box-shadow: 0 0 0 3px var(--focus);
 }
 
 .ghost-button:disabled {
@@ -590,6 +632,17 @@ th {
 
   .pagination-actions {
     width: 100%;
+    justify-content: stretch;
+  }
+
+  .page-size-select,
+  .page-jump-form {
+    width: 100%;
+  }
+
+  .page-size-select select,
+  .page-jump-form input {
+    flex: 1;
   }
 
   .status-grid,

@@ -119,8 +119,7 @@ const refreshIntervals: Array<{ label: string; value: RefreshIntervalMs }> = [
   { label: '30 秒', value: 30000 },
   { label: '1 分钟', value: 60000 }
 ];
-const requestPageSize = 20;
-const imagePageSize = 10;
+const pageSizeOptions = [10, 20, 50, 100];
 
 function App() {
   const [authState, setAuthState] = useState<AuthState>('checking');
@@ -216,10 +215,18 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
   const [refreshing, setRefreshing] = useState(false);
   const [refreshIntervalMs, setRefreshIntervalMs] = useState<RefreshIntervalMs>(5000);
   const [requestPage, setRequestPage] = useState(1);
+  const [requestPageSize, setRequestPageSize] = useState(20);
   const [imagePage, setImagePage] = useState(1);
+  const [imagePageSize, setImagePageSize] = useState(10);
   const [error, setError] = useState('');
 
-  async function load(options: { silent?: boolean; requestPage?: number; imagePage?: number } = {}) {
+  async function load(options: {
+    silent?: boolean;
+    requestPage?: number;
+    requestPageSize?: number;
+    imagePage?: number;
+    imagePageSize?: number;
+  } = {}) {
     if (options.silent) {
       setRefreshing(true);
     } else {
@@ -228,15 +235,19 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
     setError('');
     try {
       const nextRequestPage = options.requestPage ?? requestPage;
+      const nextRequestPageSize = options.requestPageSize ?? requestPageSize;
       const nextImagePage = options.imagePage ?? imagePage;
+      const nextImagePageSize = options.imagePageSize ?? imagePageSize;
       const [summary, requests, images, errors] = await Promise.all([
         fetchJson<{ runtime: RuntimeStats; summary: Summary }>(adminPath('/api/summary')),
-        fetchJson<PaginatedRecords>(adminPath(`/api/requests?page=${nextRequestPage}&page_size=${requestPageSize}`)),
-        fetchJson<PaginatedRecords>(adminPath(`/api/images?page=${nextImagePage}&page_size=${imagePageSize}`)),
+        fetchJson<PaginatedRecords>(adminPath(`/api/requests?page=${nextRequestPage}&page_size=${nextRequestPageSize}`)),
+        fetchJson<PaginatedRecords>(adminPath(`/api/images?page=${nextImagePage}&page_size=${nextImagePageSize}`)),
         fetchJson<{ data: ErrorRecord[] }>(adminPath('/api/errors'))
       ]);
       setRequestPage(requests.page);
+      setRequestPageSize(requests.pageSize);
       setImagePage(images.page);
+      setImagePageSize(images.pageSize);
       setData({
         runtime: summary.runtime,
         summary: summary.summary,
@@ -262,7 +273,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
   useEffect(() => {
     const timer = window.setInterval(() => void load({ silent: true }), refreshIntervalMs);
     return () => window.clearInterval(timer);
-  }, [refreshIntervalMs, requestPage, imagePage]);
+  }, [refreshIntervalMs, requestPage, requestPageSize, imagePage, imagePageSize]);
 
   async function logout() {
     await fetch(adminPath('/logout'), { method: 'POST' });
@@ -275,9 +286,21 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
     void load({ silent: true, requestPage: page });
   }
 
+  function changeRequestPageSize(pageSize: number) {
+    setRequestPage(1);
+    setRequestPageSize(pageSize);
+    void load({ silent: true, requestPage: 1, requestPageSize: pageSize });
+  }
+
   function changeImagePage(page: number) {
     setImagePage(page);
     void load({ silent: true, imagePage: page });
+  }
+
+  function changeImagePageSize(pageSize: number) {
+    setImagePage(1);
+    setImagePageSize(pageSize);
+    void load({ silent: true, imagePage: 1, imagePageSize: pageSize });
   }
 
   const memoryPercent = data ? percent(data.runtime.memory.rssBytes, data.runtime.memory.maxRssBytes) : 0;
@@ -407,8 +430,8 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
           </section>
 
           <ErrorPanel errors={data.errors} />
-          <ImageTable page={data.images} onPageChange={changeImagePage} />
-          <RequestTable page={data.requests} onPageChange={changeRequestPage} />
+          <ImageTable page={data.images} onPageChange={changeImagePage} onPageSizeChange={changeImagePageSize} />
+          <RequestTable page={data.requests} onPageChange={changeRequestPage} onPageSizeChange={changeRequestPageSize} />
         </>
       ) : (
         <div className="panel empty-panel">
@@ -493,7 +516,11 @@ function ErrorPanel({ errors }: { errors: ErrorRecord[] }) {
   );
 }
 
-function ImageTable({ page, onPageChange }: { page: PaginatedRecords; onPageChange: (page: number) => void }) {
+function ImageTable({ page, onPageChange, onPageSizeChange }: {
+  page: PaginatedRecords;
+  onPageChange: (page: number) => void;
+  onPageSizeChange: (pageSize: number) => void;
+}) {
   return (
     <section className="panel table-panel">
       <div className="panel-heading">
@@ -552,12 +579,16 @@ function ImageTable({ page, onPageChange }: { page: PaginatedRecords; onPageChan
           </tbody>
         </table>
       </div>
-      <Pagination page={page} onPageChange={onPageChange} />
+      <Pagination page={page} onPageChange={onPageChange} onPageSizeChange={onPageSizeChange} />
     </section>
   );
 }
 
-function RequestTable({ page, onPageChange }: { page: PaginatedRecords; onPageChange: (page: number) => void }) {
+function RequestTable({ page, onPageChange, onPageSizeChange }: {
+  page: PaginatedRecords;
+  onPageChange: (page: number) => void;
+  onPageSizeChange: (pageSize: number) => void;
+}) {
   return (
     <section className="panel table-panel">
       <div className="panel-heading">
@@ -625,14 +656,28 @@ function RequestTable({ page, onPageChange }: { page: PaginatedRecords; onPageCh
           </tbody>
         </table>
       </div>
-      <Pagination page={page} onPageChange={onPageChange} />
+      <Pagination page={page} onPageChange={onPageChange} onPageSizeChange={onPageSizeChange} />
     </section>
   );
 }
 
-function Pagination({ page, onPageChange }: { page: PaginatedRecords; onPageChange: (page: number) => void }) {
+function Pagination({ page, onPageChange, onPageSizeChange }: {
+  page: PaginatedRecords;
+  onPageChange: (page: number) => void;
+  onPageSizeChange: (pageSize: number) => void;
+}) {
   const hasPrevious = page.page > 1;
   const hasNext = page.page < page.totalPages;
+
+  function jump(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const formData = new FormData(event.currentTarget);
+    const nextPage = Number.parseInt(String(formData.get('page') ?? ''), 10);
+    if (!Number.isFinite(nextPage)) {
+      return;
+    }
+    onPageChange(Math.min(page.totalPages, Math.max(1, nextPage)));
+  }
 
   return (
     <div className="pagination">
@@ -640,9 +685,32 @@ function Pagination({ page, onPageChange }: { page: PaginatedRecords; onPageChan
         共 {formatNumber(page.total)} 条，第 {formatNumber(page.page)} / {formatNumber(page.totalPages)} 页
       </span>
       <div className="pagination-actions">
+        <label className="page-size-select">
+          <span>每页</span>
+          <select
+            value={page.pageSize}
+            onChange={(event) => onPageSizeChange(Number(event.target.value))}
+          >
+            {pageSizeOptions.map((pageSize) => (
+              <option key={pageSize} value={pageSize}>{pageSize} 条</option>
+            ))}
+          </select>
+        </label>
         <button className="ghost-button" disabled={!hasPrevious} onClick={() => onPageChange(page.page - 1)}>
           上一页
         </button>
+        <form className="page-jump-form" onSubmit={jump}>
+          <span>跳至</span>
+          <input
+            name="page"
+            type="number"
+            min={1}
+            max={page.totalPages}
+            defaultValue={page.page}
+            aria-label="跳转页码"
+          />
+          <button className="ghost-button" type="submit">确定</button>
+        </form>
         <button className="ghost-button" disabled={!hasNext} onClick={() => onPageChange(page.page + 1)}>
           下一页
         </button>
