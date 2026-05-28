@@ -18,6 +18,7 @@ interface RequestRow {
   image_bytes: number;
   image_count: number;
   error_code: string | null;
+  error_message: string | null;
   image_urls_json: string;
 }
 
@@ -59,6 +60,7 @@ export class AdminStore {
         image_bytes INTEGER NOT NULL,
         image_count INTEGER NOT NULL,
         error_code TEXT,
+        error_message TEXT,
         image_urls_json TEXT NOT NULL
       );
 
@@ -70,6 +72,7 @@ export class AdminStore {
     `);
 
     this.#ensureColumn('image_requests', 'operation', "TEXT NOT NULL DEFAULT 'generation'");
+    this.#ensureColumn('image_requests', 'error_message', 'TEXT');
   }
 
   #ensureColumn(table: string, column: string, definition: string): void {
@@ -98,6 +101,7 @@ export class AdminStore {
         image_bytes,
         image_count,
         error_code,
+        error_message,
         image_urls_json
       ) VALUES (
         @request_id,
@@ -114,6 +118,7 @@ export class AdminStore {
         @image_bytes,
         @image_count,
         @error_code,
+        @error_message,
         @image_urls_json
       )
     `).run({
@@ -131,6 +136,7 @@ export class AdminStore {
       image_bytes: record.imageBytes,
       image_count: record.imageCount,
       error_code: record.errorCode ?? null,
+      error_message: truncateText(record.errorMessage, 500),
       image_urls_json: JSON.stringify(record.imageUrls)
     });
   }
@@ -303,8 +309,17 @@ function mapRow(row: RequestRow): ImageRequestRecord {
     imageBytes: row.image_bytes,
     imageCount: row.image_count,
     errorCode: row.error_code ?? undefined,
+    errorMessage: row.error_message ?? undefined,
     imageUrls: safeJsonArray(row.image_urls_json)
   };
+}
+
+function truncateText(value: string | undefined, maxLength: number): string | null {
+  if (!value) {
+    return null;
+  }
+
+  return value.length > maxLength ? `${value.slice(0, maxLength - 1)}...` : value;
 }
 
 function safeJsonArray(value: string): string[] {

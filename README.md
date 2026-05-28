@@ -225,7 +225,8 @@ after every restart. The login uses an HttpOnly cookie scoped to
 
 The dashboard stores recent request metrics in SQLite for troubleshooting:
 operation type, status, timings, model, image size, error code, and returned
-image URLs. It does not store prompts, uploaded source images, masks,
+image URLs. For upstream failures, it also stores the upstream error message
+truncated to 500 characters. It does not store prompts, uploaded source images, masks,
 Authorization headers, R2 secrets, or new-api keys.
 
 Dashboard APIs:

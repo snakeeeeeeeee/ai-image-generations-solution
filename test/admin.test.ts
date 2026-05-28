@@ -307,6 +307,52 @@ test('failed image requests are recorded with error code', async () => {
   await upstream.close();
 });
 
+test('upstream image errors record upstream status code and message', async () => {
+  const upstream = Fastify();
+  const store = new AdminStore(':memory:');
+
+  upstream.post('/v1/images/generations', async (_request, reply) => reply.status(500).send({
+    error: {
+      message: 'status_code=403, image generation quota exceeded',
+      type: 'server_error',
+      code: 'image_generation_quota_exceeded',
+      status_code: 403
+    }
+  }));
+
+  await upstream.listen({ port: 0, host: '127.0.0.1' });
+  const address = upstream.server.address();
+  assert.ok(address && typeof address === 'object');
+
+  const app = buildServer(buildTestConfig(`http://127.0.0.1:${(address as AddressInfo).port}`), {
+    adminStore: store,
+    uploadPngToR2: async ({ key }) => `https://img.example.com/${key}`
+  });
+
+  const response = await app.inject({
+    method: 'POST',
+    url: '/v1/images/generations',
+    headers: {
+      authorization: 'Bearer secret-new-api-key'
+    },
+    payload: {
+      model: 'gpt-image-2-count',
+      prompt: 'test',
+      size: '3840x2160'
+    }
+  });
+  assert.equal(response.statusCode, 500);
+
+  const records = store.getRecentRequests(10);
+  assert.equal(records.length, 1);
+  assert.equal(records[0]?.statusCode, 403);
+  assert.equal(records[0]?.errorCode, 'image_generation_quota_exceeded');
+  assert.equal(records[0]?.errorMessage, 'status_code=403, image generation quota exceeded');
+
+  await app.close();
+  await upstream.close();
+});
+
 test('memory guard failures are recorded with error code', async () => {
   const upstream = await buildUpstream();
   const store = new AdminStore(':memory:');

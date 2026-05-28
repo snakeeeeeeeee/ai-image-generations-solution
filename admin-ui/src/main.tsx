@@ -82,6 +82,7 @@ interface RequestRecord {
   imageBytes: number;
   imageCount: number;
   errorCode?: string;
+  errorMessage?: string;
   imageUrls: string[];
 }
 
@@ -580,13 +581,14 @@ function RequestTable({ page, onPageChange }: { page: PaginatedRecords; onPageCh
               <th>上传</th>
               <th>图片</th>
               <th>错误</th>
+              <th>错误详情</th>
               <th>URL</th>
             </tr>
           </thead>
           <tbody>
             {page.data.length === 0 ? (
               <tr>
-                <td colSpan={12} className="table-empty">暂无请求记录</td>
+                <td colSpan={13} className="table-empty">暂无请求记录</td>
               </tr>
             ) : page.data.map((request) => (
               <tr key={request.requestId}>
@@ -608,6 +610,9 @@ function RequestTable({ page, onPageChange }: { page: PaginatedRecords; onPageCh
                 <td>{formatMs(request.uploadMs)}</td>
                 <td>{request.imageCount} / {formatBytes(request.imageBytes)}</td>
                 <td>{request.errorCode ?? '-'}</td>
+                <td className="error-message-cell">
+                  <span title={request.errorMessage ?? ''}>{request.errorMessage ?? '-'}</span>
+                </td>
                 <td>
                   {request.imageUrls[0] ? (
                     <button className="icon-button" onClick={() => void navigator.clipboard.writeText(request.imageUrls[0] ?? '')} title="复制 URL">

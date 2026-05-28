@@ -500,6 +500,21 @@ th {
   align-items: center;
 }
 
+.error-message-cell {
+  width: 320px;
+  min-width: 320px;
+  max-width: 320px;
+  color: var(--text-soft);
+}
+
+.error-message-cell span {
+  display: block;
+  width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .table-empty {
   text-align: center;
   color: var(--text-muted);

@@ -21,6 +21,12 @@ interface UpstreamImageResponse {
   [key: string]: unknown;
 }
 
+interface UpstreamErrorInfo {
+  statusCode?: number;
+  code: string;
+  message?: string;
+}
+
 interface Timings {
   openai_ms: number;
   decode_ms: number;
@@ -104,6 +110,72 @@ function getFieldMetadata(fields: Map<string, string>): { model?: string; size?:
 
 function getObjectField(value: unknown, key: string): unknown {
   return value && typeof value === 'object' ? (value as Record<string, unknown>)[key] : undefined;
+}
+
+function getStringField(value: unknown, key: string): string | undefined {
+  const field = getObjectField(value, key);
+  return typeof field === 'string' && field.trim() !== '' ? field : undefined;
+}
+
+function getNumberField(value: unknown, key: string): number | undefined {
+  const field = getObjectField(value, key);
+  if (typeof field === 'number' && Number.isInteger(field) && field >= 100 && field <= 599) {
+    return field;
+  }
+
+  if (typeof field === 'string') {
+    const parsed = Number.parseInt(field, 10);
+    return Number.isInteger(parsed) && parsed >= 100 && parsed <= 599 ? parsed : undefined;
+  }
+
+  return undefined;
+}
+
+function getUpstreamErrorInfo(error: unknown): UpstreamErrorInfo | undefined {
+  if (!(error instanceof AppError) || error.code !== 'new_api_error') {
+    return undefined;
+  }
+
+  const body = error.cause;
+  const nestedError = getObjectField(body, 'error');
+  const source = nestedError && typeof nestedError === 'object' ? nestedError : body;
+  const statusCode =
+    getNumberField(source, 'status_code') ??
+    getNumberField(source, 'statusCode') ??
+    getNumberField(body, 'status_code') ??
+    getNumberField(body, 'statusCode') ??
+    error.statusCode;
+  const code =
+    getStringField(source, 'code') ??
+    getStringField(source, 'type') ??
+    getStringField(body, 'code') ??
+    'new_api_error';
+  const message =
+    getStringField(source, 'message') ??
+    getStringField(body, 'message') ??
+    (typeof body === 'string' ? body : undefined);
+
+  return {
+    statusCode,
+    code,
+    message
+  };
+}
+
+function getAdminStatusCode(error: unknown): number {
+  return getUpstreamErrorInfo(error)?.statusCode ?? getAppErrorStatus(error);
+}
+
+function getAdminErrorCode(error: unknown): string {
+  return getUpstreamErrorInfo(error)?.code ?? getAppErrorCode(error);
+}
+
+function getAdminErrorMessage(error: unknown): string | undefined {
+  if (error instanceof AppError) {
+    return getUpstreamErrorInfo(error)?.message ?? error.message;
+  }
+
+  return error instanceof Error ? error.message : String(error);
 }
 
 function r2ErrorDetails(error: unknown): Record<string, unknown> {
@@ -586,7 +658,7 @@ export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyIn
           requestId: request.id,
           createdAt: new Date().toISOString(),
           operation,
-          statusCode: error instanceof AppError ? error.statusCode : 500,
+          statusCode: getAdminStatusCode(error),
           success: false,
           ...metadata,
           totalMs,
@@ -595,7 +667,8 @@ export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyIn
           uploadMs: timings.upload_ms,
           imageBytes: totalImageBytes,
           imageCount,
-          errorCode: getAppErrorCode(error),
+          errorCode: getAdminErrorCode(error),
+          errorMessage: getAdminErrorMessage(error),
           imageUrls
         }, request);
         return upstreamReply;
@@ -605,7 +678,7 @@ export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyIn
         requestId: request.id,
         createdAt: new Date().toISOString(),
         operation,
-        statusCode: getAppErrorStatus(error),
+        statusCode: getAdminStatusCode(error),
         success: false,
         ...metadata,
         totalMs,
@@ -614,7 +687,8 @@ export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyIn
         uploadMs: timings.upload_ms,
         imageBytes: totalImageBytes,
         imageCount,
-        errorCode: getAppErrorCode(error),
+        errorCode: getAdminErrorCode(error),
+        errorMessage: getAdminErrorMessage(error),
         imageUrls
       }, request);
 

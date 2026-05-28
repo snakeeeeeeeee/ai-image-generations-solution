@@ -23,6 +23,7 @@ export interface ImageRequestRecord {
   imageBytes: number;
   imageCount: number;
   errorCode?: string;
+  errorMessage?: string;
   imageUrls: string[];
 }
 
