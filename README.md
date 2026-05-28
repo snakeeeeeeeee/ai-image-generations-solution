@@ -32,6 +32,10 @@ R2_ACCESS_KEY_ID=...
 R2_SECRET_ACCESS_KEY=...
 R2_BUCKET=<bucket-name>
 R2_PUBLIC_URL=https://<public-image-domain>
+ADMIN_PASSWORD=<admin-console-password>
+ADMIN_SESSION_SECRET=<long-random-session-secret>
+ADMIN_DB_PATH=./data/admin.sqlite
+ADMIN_RETENTION_DAYS=7
 ```
 
 ## Run
@@ -165,6 +169,39 @@ Response:
 - Uploaded object headers:
   - `Content-Type: image/png`
   - `Cache-Control: public, max-age=86400`
+
+## Admin dashboard
+
+The service includes a Chinese internal dashboard at `/admin`. It is served by
+the same Fastify process after `npm run build`.
+
+Required settings:
+
+```env
+ADMIN_PASSWORD=<admin-console-password>
+ADMIN_SESSION_SECRET=<long-random-session-secret>
+ADMIN_DB_PATH=./data/admin.sqlite
+ADMIN_RETENTION_DAYS=7
+ADMIN_RECENT_LIMIT=1000
+```
+
+Use a stable `ADMIN_SESSION_SECRET` in production; otherwise sessions are reset
+after every restart. The login uses an HttpOnly cookie scoped to `/admin`.
+
+The dashboard stores recent request metrics in SQLite for troubleshooting:
+status, timings, model, image size, error code, and returned image URLs. It does
+not store prompts, Authorization headers, R2 secrets, or new-api keys.
+
+Dashboard APIs:
+
+```text
+GET  /admin/login
+POST /admin/login
+POST /admin/logout
+GET  /admin/api/summary
+GET  /admin/api/requests
+GET  /admin/api/errors
+```
 
 ## nginx
 

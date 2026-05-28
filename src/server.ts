@@ -1,5 +1,8 @@
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 import { performance } from 'node:perf_hooks';
+import { registerAdminRoutes } from './admin/routes.js';
+import { AdminStore } from './admin/store.js';
+import type { AdminRuntimeStats, ImageRequestRecord } from './admin/types.js';
 import type { AppConfig } from './config.js';
 import { AppError, openAIError, sendAppError } from './errors.js';
 import { applyImageDefaults, assertPng, buildImageKey, decodeBase64Image, type ImageRequestBody } from './image.js';
@@ -40,6 +43,45 @@ interface UpstreamFetchResult {
 
 interface ServerDeps {
   uploadPngToR2?: UploadPngToR2;
+  adminStore?: AdminStore;
+}
+
+function runtimeStats(
+  config: AppConfig,
+  generationLimiter: ActiveRequestLimiter,
+  imageProcessingLimiter: ActiveRequestLimiter
+): AdminRuntimeStats {
+  const memory = getMemorySnapshot(config);
+  return {
+    activeGenerations: generationLimiter.active,
+    queuedGenerations: generationLimiter.queued,
+    maxConcurrentGenerations: generationLimiter.max,
+    activeImageProcessing: imageProcessingLimiter.active,
+    queuedImageProcessing: imageProcessingLimiter.queued,
+    maxConcurrentImageProcessing: imageProcessingLimiter.max,
+    memory: {
+      rssBytes: memory.rss_bytes,
+      heapUsedBytes: memory.heap_used_bytes,
+      externalBytes: memory.external_bytes,
+      arrayBuffersBytes: memory.array_buffers_bytes,
+      maxRssBytes: memory.max_rss_bytes
+    }
+  };
+}
+
+function getAppErrorCode(error: unknown): string {
+  return error instanceof AppError ? error.code : 'internal_error';
+}
+
+function getAppErrorStatus(error: unknown): number {
+  return error instanceof AppError ? error.statusCode : 500;
+}
+
+function getRequestMetadata(body: ImageRequestBody | undefined): { model?: string; size?: string } {
+  return {
+    model: typeof body?.model === 'string' ? body.model : undefined,
+    size: typeof body?.size === 'string' ? body.size : undefined
+  };
 }
 
 function getObjectField(value: unknown, key: string): unknown {
@@ -197,6 +239,7 @@ function sendUpstreamError(reply: FastifyReply, error: unknown): FastifyReply | 
 export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyInstance {
   const r2Client = createR2Client(config.r2);
   const upload = deps.uploadPngToR2 ?? uploadPngToR2;
+  const adminStore = deps.adminStore ?? new AdminStore(config.admin.dbPath);
   const generationLimiter = new ActiveRequestLimiter(config.limits.maxConcurrentGenerations);
   const imageProcessingLimiter = new ActiveRequestLimiter(config.limits.maxConcurrentImageProcessing);
   const app = Fastify({
@@ -206,6 +249,25 @@ export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyIn
     },
     bodyLimit: config.bodyLimitBytes,
     requestIdHeader: 'x-request-id'
+  });
+  const cleanupInterval = setInterval(() => {
+    try {
+      adminStore.cleanup(config.admin.retentionDays);
+    } catch (error) {
+      app.log.error({ err: error }, 'admin metrics cleanup failed');
+    }
+  }, 60 * 60 * 1000);
+  cleanupInterval.unref();
+
+  app.addHook('onClose', async () => {
+    clearInterval(cleanupInterval);
+    adminStore.close();
+  });
+
+  registerAdminRoutes(app, {
+    config: config.admin,
+    store: adminStore,
+    getRuntimeStats: () => runtimeStats(config, generationLimiter, imageProcessingLimiter)
   });
 
   app.get('/healthz', async () => ({
@@ -224,6 +286,10 @@ export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyIn
     let releaseGenerationSlot: (() => void) | undefined;
     let releaseImageProcessingSlot: (() => void) | undefined;
     let stopUpstreamTimeout: (() => void) | undefined;
+    let upstreamBody: ImageRequestBody | undefined;
+    let totalImageBytes = 0;
+    let imageCount = 0;
+    let imageUrls: string[] = [];
     const timings: Timings = {
       openai_ms: 0,
       decode_ms: 0,
@@ -239,7 +305,7 @@ export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyIn
         });
       }
 
-      const upstreamBody = applyImageDefaults(request.body, config.defaults);
+      upstreamBody = applyImageDefaults(request.body, config.defaults);
       assertMemoryAvailable(config);
       releaseGenerationSlot = generationLimiter.tryAcquire() ?? undefined;
       if (!releaseGenerationSlot) {
@@ -262,7 +328,6 @@ export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyIn
       stopUpstreamTimeout = undefined;
 
       const outputData: Array<{ url: string }> = [];
-      let totalImageBytes = 0;
       const data = Array.isArray(upstreamResponse.data) ? upstreamResponse.data : [];
       if (data.length === 0) {
         throw new AppError('new-api returned no image data', {
@@ -314,6 +379,8 @@ export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyIn
 
         outputData.push({ url });
       }
+      imageCount = outputData.length;
+      imageUrls = outputData.map((item) => item.url);
 
       const totalMs = msSince(totalStartedAt);
       request.log.info({
@@ -330,14 +397,30 @@ export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyIn
         upload_ms: timings.upload_ms,
         total_ms: totalMs,
         image_bytes: totalImageBytes,
-        image_count: outputData.length
+        image_count: imageCount
       }, 'image generation wrapped');
+
+      recordAdminRequest(adminStore, {
+        requestId: request.id,
+        createdAt: new Date().toISOString(),
+        statusCode: 200,
+        success: true,
+        ...getRequestMetadata(upstreamBody),
+        totalMs,
+        openaiMs: timings.openai_ms,
+        decodeMs: timings.decode_ms,
+        uploadMs: timings.upload_ms,
+        imageBytes: totalImageBytes,
+        imageCount,
+        imageUrls
+      }, request);
 
       return reply.send({
         created: upstreamResponse.created || Math.floor(Date.now() / 1000),
         data: outputData
       });
     } catch (error) {
+      const totalMs = msSince(totalStartedAt);
       request.log.error({
         request_id: request.id,
         err: error,
@@ -351,13 +434,44 @@ export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyIn
         openai_ms: timings.openai_ms,
         decode_ms: timings.decode_ms,
         upload_ms: timings.upload_ms,
-        total_ms: msSince(totalStartedAt)
+        total_ms: totalMs
       }, 'image generation failed');
 
       const upstreamReply = sendUpstreamError(reply, error);
       if (upstreamReply) {
+        recordAdminRequest(adminStore, {
+          requestId: request.id,
+          createdAt: new Date().toISOString(),
+          statusCode: error instanceof AppError ? error.statusCode : 500,
+          success: false,
+          ...getRequestMetadata(upstreamBody),
+          totalMs,
+          openaiMs: timings.openai_ms,
+          decodeMs: timings.decode_ms,
+          uploadMs: timings.upload_ms,
+          imageBytes: totalImageBytes,
+          imageCount,
+          errorCode: getAppErrorCode(error),
+          imageUrls
+        }, request);
         return upstreamReply;
       }
+
+      recordAdminRequest(adminStore, {
+        requestId: request.id,
+        createdAt: new Date().toISOString(),
+        statusCode: getAppErrorStatus(error),
+        success: false,
+        ...getRequestMetadata(upstreamBody),
+        totalMs,
+        openaiMs: timings.openai_ms,
+        decodeMs: timings.decode_ms,
+        uploadMs: timings.upload_ms,
+        imageBytes: totalImageBytes,
+        imageCount,
+        errorCode: getAppErrorCode(error),
+        imageUrls
+      }, request);
 
       return sendAppError(reply, error);
     } finally {
@@ -368,4 +482,12 @@ export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyIn
   });
 
   return app;
+}
+
+function recordAdminRequest(store: AdminStore, record: ImageRequestRecord, request: FastifyRequest): void {
+  try {
+    store.recordRequest(record);
+  } catch (error) {
+    request.log.error({ err: error, request_id: record.requestId }, 'failed to record admin metrics');
+  }
 }

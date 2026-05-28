@@ -1,4 +1,6 @@
 import 'dotenv/config';
+import { randomBytes } from 'node:crypto';
+import type { AdminConfig } from './admin/types.js';
 
 const DEFAULT_BODY_LIMIT_BYTES = 100 * 1024 * 1024;
 
@@ -22,6 +24,7 @@ export interface AppConfig {
     outputFormat: 'png';
   };
   r2: R2Config;
+  admin: AdminConfig;
 }
 
 export interface R2Config {
@@ -104,6 +107,14 @@ export function loadConfig(): AppConfig {
       publicUrl: normalizeBaseUrl(requireEnv('R2_PUBLIC_URL')),
       keyPrefix: optionalEnv('R2_KEY_PREFIX', 'images').replace(/^\/+|\/+$/g, ''),
       cacheControl: optionalEnv('R2_CACHE_CONTROL', 'public, max-age=86400')
+    },
+    admin: {
+      password: optionalEnv('ADMIN_PASSWORD', ''),
+      sessionSecret: optionalEnv('ADMIN_SESSION_SECRET', randomBytes(32).toString('hex')),
+      dbPath: optionalEnv('ADMIN_DB_PATH', './data/admin.sqlite'),
+      retentionDays: parsePositiveInt('ADMIN_RETENTION_DAYS', 7),
+      recentLimit: parsePositiveInt('ADMIN_RECENT_LIMIT', 1000),
+      cookieSecure: optionalEnv('NODE_ENV', 'development') === 'production'
     }
   };
 }

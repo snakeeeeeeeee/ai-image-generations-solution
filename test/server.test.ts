@@ -39,6 +39,14 @@ function buildTestConfig(baseUrl: string, overrides: DeepPartial<AppConfig> = {}
       publicUrl: 'https://img.example.com',
       keyPrefix: 'images',
       cacheControl: 'public, max-age=86400'
+    },
+    admin: {
+      password: 'admin-pass',
+      sessionSecret: 'test-session-secret-at-least-long-enough',
+      dbPath: ':memory:',
+      retentionDays: 7,
+      recentLimit: 1000,
+      cookieSecure: false
     }
   };
 
@@ -60,6 +68,10 @@ function buildTestConfig(baseUrl: string, overrides: DeepPartial<AppConfig> = {}
     r2: {
       ...base.r2,
       ...overrides.r2
+    },
+    admin: {
+      ...base.admin,
+      ...overrides.admin
     }
   };
 }
