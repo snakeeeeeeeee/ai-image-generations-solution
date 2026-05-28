@@ -1,0 +1,36 @@
+import Fastify from 'fastify';
+
+const port = Number.parseInt(process.env.MOCK_NEW_API_PORT || '3999', 10);
+const host = process.env.MOCK_NEW_API_HOST || '127.0.0.1';
+
+const app = Fastify({
+  logger: true
+});
+
+// A tiny valid PNG. This is enough to verify decode, upload, and public URL flow.
+const tinyPngBase64 = 'iVBORw0KGgo=';
+
+app.get('/healthz', async () => ({
+  ok: true
+}));
+
+app.post('/v1/images/generations', async (request) => {
+  request.log.info({
+    authorization_present: Boolean(request.headers.authorization),
+    body: request.body
+  }, 'mock new-api received image request');
+
+  return {
+    created: Math.floor(Date.now() / 1000),
+    data: [
+      {
+        b64_json: tinyPngBase64
+      }
+    ]
+  };
+});
+
+await app.listen({
+  host,
+  port
+});
