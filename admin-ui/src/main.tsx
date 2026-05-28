@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import {
   Activity,
@@ -93,14 +93,32 @@ interface ErrorRecord {
 interface DashboardData {
   runtime: RuntimeStats;
   summary: Summary;
-  requests: RequestRecord[];
   errors: ErrorRecord[];
+  requests: PaginatedRecords;
+  images: PaginatedRecords;
+}
+
+interface PaginatedRecords {
+  data: RequestRecord[];
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
 }
 
 type AuthState = 'checking' | 'authenticated' | 'anonymous';
+type RefreshIntervalMs = 5000 | 15000 | 30000 | 60000;
 
 const adminBasePath = new URL(import.meta.env.BASE_URL, window.location.origin).pathname.replace(/\/+$/, '');
 const adminPath = (path = '') => `${adminBasePath}${path}`;
+const refreshIntervals: Array<{ label: string; value: RefreshIntervalMs }> = [
+  { label: '5 秒', value: 5000 },
+  { label: '15 秒', value: 15000 },
+  { label: '30 秒', value: 30000 },
+  { label: '1 分钟', value: 60000 }
+];
+const requestPageSize = 20;
+const imagePageSize = 10;
 
 function App() {
   const [authState, setAuthState] = useState<AuthState>('checking');
@@ -193,40 +211,71 @@ function LoginPage({ onLogin }: { onLogin: () => void }) {
 function Dashboard({ onLogout }: { onLogout: () => void }) {
   const [data, setData] = useState<DashboardData | null>(null);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [refreshIntervalMs, setRefreshIntervalMs] = useState<RefreshIntervalMs>(5000);
+  const [requestPage, setRequestPage] = useState(1);
+  const [imagePage, setImagePage] = useState(1);
   const [error, setError] = useState('');
 
-  async function load() {
-    setLoading(true);
+  async function load(options: { silent?: boolean; requestPage?: number; imagePage?: number } = {}) {
+    if (options.silent) {
+      setRefreshing(true);
+    } else {
+      setLoading(true);
+    }
     setError('');
     try {
-      const [summary, requests, errors] = await Promise.all([
+      const nextRequestPage = options.requestPage ?? requestPage;
+      const nextImagePage = options.imagePage ?? imagePage;
+      const [summary, requests, images, errors] = await Promise.all([
         fetchJson<{ runtime: RuntimeStats; summary: Summary }>(adminPath('/api/summary')),
-        fetchJson<{ data: RequestRecord[] }>(adminPath('/api/requests')),
+        fetchJson<PaginatedRecords>(adminPath(`/api/requests?page=${nextRequestPage}&page_size=${requestPageSize}`)),
+        fetchJson<PaginatedRecords>(adminPath(`/api/images?page=${nextImagePage}&page_size=${imagePageSize}`)),
         fetchJson<{ data: ErrorRecord[] }>(adminPath('/api/errors'))
       ]);
+      setRequestPage(requests.page);
+      setImagePage(images.page);
       setData({
         runtime: summary.runtime,
         summary: summary.summary,
-        requests: requests.data,
-        errors: errors.data
+        errors: errors.data,
+        requests,
+        images
       });
     } catch {
       setError('无法加载监控数据，请确认登录状态和服务运行状态。');
     } finally {
-      setLoading(false);
+      if (options.silent) {
+        setRefreshing(false);
+      } else {
+        setLoading(false);
+      }
     }
   }
 
   useEffect(() => {
     void load();
-    const timer = window.setInterval(() => void load(), 15000);
-    return () => window.clearInterval(timer);
   }, []);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => void load({ silent: true }), refreshIntervalMs);
+    return () => window.clearInterval(timer);
+  }, [refreshIntervalMs, requestPage, imagePage]);
 
   async function logout() {
     await fetch(adminPath('/logout'), { method: 'POST' });
     history.replaceState(null, '', adminPath('/login'));
     onLogout();
+  }
+
+  function changeRequestPage(page: number) {
+    setRequestPage(page);
+    void load({ silent: true, requestPage: page });
+  }
+
+  function changeImagePage(page: number) {
+    setImagePage(page);
+    void load({ silent: true, imagePage: page });
   }
 
   const memoryPercent = data ? percent(data.runtime.memory.rssBytes, data.runtime.memory.maxRssBytes) : 0;
@@ -240,11 +289,22 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
       <header className="topbar">
         <div>
           <p className="eyebrow">图片包装服务</p>
-          <h1>中文监控台</h1>
+          <h1>监控台</h1>
         </div>
         <div className="topbar-actions">
-          <button className="ghost-button" onClick={() => void load()} disabled={loading}>
-            <RefreshCw size={17} className={loading ? 'spin' : ''} />
+          <label className="refresh-select">
+            <span>自动刷新</span>
+            <select
+              value={refreshIntervalMs}
+              onChange={(event) => setRefreshIntervalMs(Number(event.target.value) as RefreshIntervalMs)}
+            >
+              {refreshIntervals.map((interval) => (
+                <option key={interval.value} value={interval.value}>{interval.label}</option>
+              ))}
+            </select>
+          </label>
+          <button className="ghost-button" onClick={() => void load()} disabled={loading || refreshing}>
+            <RefreshCw size={17} className={loading || refreshing ? 'spin' : ''} />
             刷新
           </button>
           <button className="ghost-button" onClick={() => void logout()}>
@@ -344,12 +404,9 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
             </div>
           </section>
 
-          <section className="split-grid">
-            <ErrorPanel errors={data.errors} />
-            <RecentImages requests={data.requests} />
-          </section>
-
-          <RequestTable requests={data.requests} />
+          <ErrorPanel errors={data.errors} />
+          <ImageTable page={data.images} onPageChange={changeImagePage} />
+          <RequestTable page={data.requests} onPageChange={changeRequestPage} />
         </>
       ) : (
         <div className="panel empty-panel">
@@ -434,35 +491,67 @@ function ErrorPanel({ errors }: { errors: ErrorRecord[] }) {
   );
 }
 
-function RecentImages({ requests }: { requests: RequestRecord[] }) {
-  const images = useMemo(() => requests.filter((request) => request.imageUrls.length > 0).slice(0, 4), [requests]);
+function ImageTable({ page, onPageChange }: { page: PaginatedRecords; onPageChange: (page: number) => void }) {
   return (
-    <section className="panel">
+    <section className="panel table-panel">
       <div className="panel-heading">
         <div>
           <h2>最近图片</h2>
-          <p>只展示最近成功生成的 URL。</p>
+          <p>分页展示成功生成的图片 URL。</p>
         </div>
       </div>
-      <div className="image-list">
-        {images.length === 0 ? (
-          <div className="empty-state"><ImageIcon size={18} /> 暂无图片记录</div>
-        ) : images.map((request) => (
-          <a className="image-row" href={request.imageUrls[0]} target="_blank" rel="noreferrer" key={request.requestId}>
-            <div className="image-thumb"><ImageIcon size={18} /></div>
-            <div>
-              <strong>{formatBytes(request.imageBytes)}</strong>
-              <span>{formatDate(request.createdAt)} · {formatMs(request.totalMs)}</span>
-            </div>
-            <LinkIcon size={16} />
-          </a>
-        ))}
+      <div className="table-scroll table-scroll-compact">
+        <table className="image-table">
+          <thead>
+            <tr>
+              <th>时间</th>
+              <th>状态</th>
+              <th>模型</th>
+              <th>尺寸</th>
+              <th>总耗时</th>
+              <th>图片大小</th>
+              <th>URL</th>
+            </tr>
+          </thead>
+          <tbody>
+            {page.data.length === 0 ? (
+              <tr>
+                <td colSpan={7} className="table-empty">暂无图片记录</td>
+              </tr>
+            ) : page.data.map((request) => (
+              <tr key={request.requestId}>
+                <td>{formatDate(request.createdAt)}</td>
+                <td>
+                  <span className="status-pill ok">
+                    <CheckCircle2 size={13} />
+                    {request.statusCode}
+                  </span>
+                </td>
+                <td>{request.model ?? '-'}</td>
+                <td>{request.size ?? '-'}</td>
+                <td>{formatMs(request.totalMs)}</td>
+                <td>{request.imageCount} / {formatBytes(request.imageBytes)}</td>
+                <td>
+                  <div className="table-actions">
+                    <a className="icon-button" href={request.imageUrls[0]} target="_blank" rel="noreferrer" title="打开 URL">
+                      <LinkIcon size={14} />
+                    </a>
+                    <button className="icon-button" onClick={() => void navigator.clipboard.writeText(request.imageUrls[0] ?? '')} title="复制 URL">
+                      <Copy size={14} />
+                    </button>
+                  </div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       </div>
+      <Pagination page={page} onPageChange={onPageChange} />
     </section>
   );
 }
 
-function RequestTable({ requests }: { requests: RequestRecord[] }) {
+function RequestTable({ page, onPageChange }: { page: PaginatedRecords; onPageChange: (page: number) => void }) {
   return (
     <section className="panel table-panel">
       <div className="panel-heading">
@@ -489,11 +578,11 @@ function RequestTable({ requests }: { requests: RequestRecord[] }) {
             </tr>
           </thead>
           <tbody>
-            {requests.length === 0 ? (
+            {page.data.length === 0 ? (
               <tr>
                 <td colSpan={11} className="table-empty">暂无请求记录</td>
               </tr>
-            ) : requests.map((request) => (
+            ) : page.data.map((request) => (
               <tr key={request.requestId}>
                 <td>{formatDate(request.createdAt)}</td>
                 <td>
@@ -522,7 +611,29 @@ function RequestTable({ requests }: { requests: RequestRecord[] }) {
           </tbody>
         </table>
       </div>
+      <Pagination page={page} onPageChange={onPageChange} />
     </section>
+  );
+}
+
+function Pagination({ page, onPageChange }: { page: PaginatedRecords; onPageChange: (page: number) => void }) {
+  const hasPrevious = page.page > 1;
+  const hasNext = page.page < page.totalPages;
+
+  return (
+    <div className="pagination">
+      <span>
+        共 {formatNumber(page.total)} 条，第 {formatNumber(page.page)} / {formatNumber(page.totalPages)} 页
+      </span>
+      <div className="pagination-actions">
+        <button className="ghost-button" disabled={!hasPrevious} onClick={() => onPageChange(page.page - 1)}>
+          上一页
+        </button>
+        <button className="ghost-button" disabled={!hasNext} onClick={() => onPageChange(page.page + 1)}>
+          下一页
+        </button>
+      </div>
+    </div>
   );
 }
 

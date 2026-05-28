@@ -20,6 +20,16 @@ interface RequestRow {
   image_urls_json: string;
 }
 
+export interface PaginatedImageRequests {
+  data: ImageRequestRecord[];
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
+}
+
+export type PaginatedImageList = PaginatedImageRequests;
+
 export class AdminStore {
   #db: Database.Database;
 
@@ -124,6 +134,64 @@ export class AdminStore {
     `).all(limit) as RequestRow[];
 
     return rows.map(mapRow);
+  }
+
+  getRequestsPage(page: number, pageSize: number): PaginatedImageRequests {
+    return this.#getPage({
+      page,
+      pageSize,
+      where: '',
+      params: []
+    });
+  }
+
+  getImagesPage(page: number, pageSize: number): PaginatedImageList {
+    return this.#getPage({
+      page,
+      pageSize,
+      where: 'WHERE image_count > 0 AND image_urls_json != ?',
+      params: ['[]']
+    });
+  }
+
+  #getPage({
+    page,
+    pageSize,
+    where,
+    params
+  }: {
+    page: number;
+    pageSize: number;
+    where: string;
+    params: unknown[];
+  }): PaginatedImageRequests {
+    const safePage = Math.max(1, Math.floor(page));
+    const safePageSize = Math.min(100, Math.max(1, Math.floor(pageSize)));
+    const totalRow = this.#db.prepare(`
+      SELECT COUNT(*) as total
+      FROM image_requests
+      ${where}
+    `).get(...params) as { total: number };
+    const total = Number(totalRow.total);
+    const totalPages = Math.max(1, Math.ceil(total / safePageSize));
+    const currentPage = Math.min(safePage, totalPages);
+    const offset = (currentPage - 1) * safePageSize;
+    const rows = this.#db.prepare(`
+      SELECT *
+      FROM image_requests
+      ${where}
+      ORDER BY created_at DESC
+      LIMIT ?
+      OFFSET ?
+    `).all(...params, safePageSize, offset) as RequestRow[];
+
+    return {
+      data: rows.map(mapRow),
+      page: currentPage,
+      pageSize: safePageSize,
+      total,
+      totalPages
+    };
   }
 
   getSummary(): {

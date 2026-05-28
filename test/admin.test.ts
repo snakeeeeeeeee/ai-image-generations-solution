@@ -188,6 +188,76 @@ test('successful image requests are recorded without prompt or authorization', a
   await upstream.close();
 });
 
+test('admin request and image APIs return paginated records', async () => {
+  const upstream = await buildUpstream();
+  const app = buildServer(buildTestConfig(upstream.baseUrl), {
+    uploadPngToR2: async ({ key }) => `https://img.example.com/${key}`
+  });
+
+  const login = await app.inject({
+    method: 'POST',
+    url: '/image-wrapper/admin/login',
+    payload: {
+      password: 'admin-pass'
+    }
+  });
+  const cookie = getCookie(login.headers['set-cookie']);
+
+  await app.inject({
+    method: 'POST',
+    url: '/v1/images/generations',
+    headers: {
+      authorization: 'Bearer secret-new-api-key'
+    },
+    payload: {
+      model: 'gpt-image-2-count',
+      prompt: 'do not save me',
+      size: '2560x1440'
+    }
+  });
+  await app.inject({
+    method: 'POST',
+    url: '/v1/images/generations',
+    headers: {
+      authorization: 'Bearer secret-new-api-key'
+    },
+    payload: {
+      model: 'gpt-image-2-count',
+      prompt: 'do not save me',
+      size: '3840x2160'
+    }
+  });
+
+  const requests = await app.inject({
+    method: 'GET',
+    url: '/image-wrapper/admin/api/requests?page=1&page_size=1',
+    headers: {
+      cookie
+    }
+  });
+  assert.equal(requests.statusCode, 200);
+  assert.equal(requests.json().data.length, 1);
+  assert.equal(requests.json().page, 1);
+  assert.equal(requests.json().pageSize, 1);
+  assert.equal(requests.json().total, 2);
+  assert.equal(requests.json().totalPages, 2);
+
+  const images = await app.inject({
+    method: 'GET',
+    url: '/image-wrapper/admin/api/images?page=1&page_size=10',
+    headers: {
+      cookie
+    }
+  });
+  assert.equal(images.statusCode, 200);
+  assert.equal(images.json().data.length, 2);
+  assert.equal(images.json().total, 2);
+  assert.match(images.json().data[0].imageUrls[0] ?? '', /^https:\/\/img\.example\.com\/images\//);
+
+  await app.close();
+  await upstream.close();
+});
+
 test('failed image requests are recorded with error code', async () => {
   const upstream = await buildUpstream();
   const store = new AdminStore(':memory:');

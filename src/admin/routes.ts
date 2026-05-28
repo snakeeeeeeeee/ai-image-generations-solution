@@ -17,6 +17,11 @@ interface LoginBody {
   password?: string;
 }
 
+interface PageQuery {
+  page?: string;
+  page_size?: string;
+}
+
 export function registerAdminRoutes(app: FastifyInstance, options: AdminRoutesOptions): void {
   app.register(cookie);
 
@@ -67,9 +72,19 @@ export function registerAdminRoutes(app: FastifyInstance, options: AdminRoutesOp
 
   app.get(route('/api/requests'), {
     preHandler: async (request, reply) => requireAdmin(options.config, request, reply)
-  }, async () => ({
-    data: options.store.getRecentRequests(options.config.recentLimit)
-  }));
+  }, async (request: FastifyRequest<{ Querystring: PageQuery }>) => {
+    const page = parseBoundedInt(request.query.page, 1, 1, Number.MAX_SAFE_INTEGER);
+    const pageSize = parseBoundedInt(request.query.page_size, 20, 1, 100);
+    return options.store.getRequestsPage(page, pageSize);
+  });
+
+  app.get(route('/api/images'), {
+    preHandler: async (request, reply) => requireAdmin(options.config, request, reply)
+  }, async (request: FastifyRequest<{ Querystring: PageQuery }>) => {
+    const page = parseBoundedInt(request.query.page, 1, 1, Number.MAX_SAFE_INTEGER);
+    const pageSize = parseBoundedInt(request.query.page_size, 10, 1, 100);
+    return options.store.getImagesPage(page, pageSize);
+  });
 
   app.get(route('/api/errors'), {
     preHandler: async (request, reply) => requireAdmin(options.config, request, reply)
@@ -84,6 +99,14 @@ export function registerAdminRoutes(app: FastifyInstance, options: AdminRoutesOp
   app.get(route('/*'), {
     preHandler: async (request, reply) => requireAdmin(options.config, request, reply)
   }, async (_request, reply) => sendAdminShell(reply, adminDist));
+}
+
+function parseBoundedInt(value: string | undefined, fallback: number, min: number, max: number): number {
+  const parsed = Number.parseInt(value ?? '', 10);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+  return Math.min(max, Math.max(min, parsed));
 }
 
 async function requireAdmin(config: AdminConfig, request: FastifyRequest, reply: FastifyReply): Promise<void> {
