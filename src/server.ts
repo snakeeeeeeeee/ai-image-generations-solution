@@ -25,6 +25,19 @@ interface Timings {
 
 type UploadPngToR2 = typeof uploadPngToR2;
 
+interface MemorySnapshot {
+  rss_bytes: number;
+  heap_used_bytes: number;
+  external_bytes: number;
+  array_buffers_bytes: number;
+  max_rss_bytes: number;
+}
+
+interface UpstreamFetchResult {
+  response: Response;
+  stopTimeout: () => void;
+}
+
 interface ServerDeps {
   uploadPngToR2?: UploadPngToR2;
 }
@@ -40,6 +53,44 @@ function r2ErrorDetails(error: unknown): Record<string, unknown> {
     code: getObjectField(error, 'Code'),
     http_status: getObjectField(getObjectField(error, '$metadata'), 'httpStatusCode')
   };
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === 'AbortError';
+}
+
+function upstreamTimeoutError(error: unknown): AppError {
+  return new AppError('new-api image generation timed out', {
+    statusCode: 504,
+    type: 'server_error',
+    code: 'upstream_timeout',
+    cause: error
+  });
+}
+
+function getMemorySnapshot(config: AppConfig): MemorySnapshot {
+  const memory = process.memoryUsage();
+  return {
+    rss_bytes: memory.rss,
+    heap_used_bytes: memory.heapUsed,
+    external_bytes: memory.external,
+    array_buffers_bytes: memory.arrayBuffers,
+    max_rss_bytes: config.limits.maxProcessRssBytes
+  };
+}
+
+function assertMemoryAvailable(config: AppConfig): void {
+  const memory = getMemorySnapshot(config);
+  if (memory.rss_bytes < config.limits.maxProcessRssBytes) {
+    return;
+  }
+
+  throw new AppError('Server memory limit exceeded, try again later', {
+    statusCode: 503,
+    type: 'server_error',
+    code: 'server_memory_limit_exceeded',
+    cause: memory
+  });
 }
 
 function upstreamUrl(config: AppConfig): string {
@@ -64,7 +115,15 @@ async function readUpstreamBody(response: Response): Promise<unknown> {
 }
 
 async function parseUpstreamResponse(response: Response): Promise<UpstreamImageResponse> {
-  const responseBody = await readUpstreamBody(response);
+  let responseBody: unknown;
+  try {
+    responseBody = await readUpstreamBody(response);
+  } catch (error) {
+    if (isAbortError(error)) {
+      throw upstreamTimeoutError(error);
+    }
+    throw error;
+  }
   if (!response.ok) {
     throw new AppError('new-api returned an error', {
       statusCode: response.status,
@@ -97,29 +156,28 @@ async function fetchUpstream({
   config: AppConfig;
   request: FastifyRequest;
   body: ImageRequestBody;
-}): Promise<Response> {
+}): Promise<UpstreamFetchResult> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), config.upstream.timeoutMs);
 
   try {
-    return await fetch(upstreamUrl(config), {
+    const response = await fetch(upstreamUrl(config), {
       method: 'POST',
       headers: copyForwardHeaders(request),
       body: JSON.stringify(body),
       signal: controller.signal
     });
+
+    return {
+      response,
+      stopTimeout: () => clearTimeout(timeout)
+    };
   } catch (error) {
-    if (error instanceof Error && error.name === 'AbortError') {
-      throw new AppError('new-api image generation timed out', {
-        statusCode: 504,
-        type: 'server_error',
-        code: 'upstream_timeout',
-        cause: error
-      });
+    clearTimeout(timeout);
+    if (isAbortError(error)) {
+      throw upstreamTimeoutError(error);
     }
     throw error;
-  } finally {
-    clearTimeout(timeout);
   }
 }
 
@@ -157,13 +215,15 @@ export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyIn
     max_concurrent_generations: generationLimiter.max,
     active_image_processing: imageProcessingLimiter.active,
     queued_image_processing: imageProcessingLimiter.queued,
-    max_concurrent_image_processing: imageProcessingLimiter.max
+    max_concurrent_image_processing: imageProcessingLimiter.max,
+    memory: getMemorySnapshot(config)
   }));
 
   app.post('/v1/images/generations', async (request, reply) => {
     const totalStartedAt = performance.now();
     let releaseGenerationSlot: (() => void) | undefined;
     let releaseImageProcessingSlot: (() => void) | undefined;
+    let stopUpstreamTimeout: (() => void) | undefined;
     const timings: Timings = {
       openai_ms: 0,
       decode_ms: 0,
@@ -180,6 +240,7 @@ export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyIn
       }
 
       const upstreamBody = applyImageDefaults(request.body, config.defaults);
+      assertMemoryAvailable(config);
       releaseGenerationSlot = generationLimiter.tryAcquire() ?? undefined;
       if (!releaseGenerationSlot) {
         throw new AppError('Too many image generation requests in progress', {
@@ -190,11 +251,15 @@ export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyIn
       }
 
       const upstreamStartedAt = performance.now();
-      const upstreamRawResponse = await fetchUpstream({ config, request, body: upstreamBody });
+      const upstreamFetch = await fetchUpstream({ config, request, body: upstreamBody });
+      stopUpstreamTimeout = upstreamFetch.stopTimeout;
 
       releaseImageProcessingSlot = await imageProcessingLimiter.acquire();
-      const upstreamResponse = await parseUpstreamResponse(upstreamRawResponse);
+      assertMemoryAvailable(config);
+      const upstreamResponse = await parseUpstreamResponse(upstreamFetch.response);
       timings.openai_ms = msSince(upstreamStartedAt);
+      stopUpstreamTimeout();
+      stopUpstreamTimeout = undefined;
 
       const outputData: Array<{ url: string }> = [];
       let totalImageBytes = 0;
@@ -259,6 +324,7 @@ export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyIn
         active_image_processing: imageProcessingLimiter.active,
         queued_image_processing: imageProcessingLimiter.queued,
         max_concurrent_image_processing: imageProcessingLimiter.max,
+        memory: getMemorySnapshot(config),
         openai_ms: timings.openai_ms,
         decode_ms: timings.decode_ms,
         upload_ms: timings.upload_ms,
@@ -281,6 +347,7 @@ export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyIn
         active_image_processing: imageProcessingLimiter.active,
         queued_image_processing: imageProcessingLimiter.queued,
         max_concurrent_image_processing: imageProcessingLimiter.max,
+        memory: getMemorySnapshot(config),
         openai_ms: timings.openai_ms,
         decode_ms: timings.decode_ms,
         upload_ms: timings.upload_ms,
@@ -294,6 +361,7 @@ export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyIn
 
       return sendAppError(reply, error);
     } finally {
+      stopUpstreamTimeout?.();
       releaseImageProcessingSlot?.();
       releaseGenerationSlot?.();
     }

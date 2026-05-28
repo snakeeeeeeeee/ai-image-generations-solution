@@ -26,6 +26,7 @@ Copy `.env.example` to `.env` and fill the secret values:
 NEW_API_BASE_URL=http://127.0.0.1:3000
 MAX_CONCURRENT_GENERATIONS=1000
 MAX_CONCURRENT_IMAGE_PROCESSING=50
+MAX_PROCESS_RSS_MB=28672
 R2_ENDPOINT=https://<account-id>.r2.cloudflarestorage.com
 R2_ACCESS_KEY_ID=...
 R2_SECRET_ACCESS_KEY=...
@@ -58,6 +59,7 @@ Recommended starting point for a large server:
 ```env
 MAX_CONCURRENT_GENERATIONS=1000
 MAX_CONCURRENT_IMAGE_PROCESSING=50
+MAX_PROCESS_RSS_MB=28672
 PM2_MAX_MEMORY_RESTART=30G
 NODE_MAX_OLD_SPACE_SIZE_MB=24576
 ```
@@ -68,6 +70,11 @@ memory-heavy phase after `b64_json` is returned: decode plus R2 upload.
 
 If 4K PNGs are larger than expected, reduce `MAX_CONCURRENT_IMAGE_PROCESSING`.
 If the server remains mostly idle during load tests, increase it gradually.
+
+`MAX_PROCESS_RSS_MB` is the service-level memory guard. When RSS reaches this
+limit, the service returns `503 server_memory_limit_exceeded` before accepting
+more image work. PM2's `max_memory_restart` remains the last-resort restart
+guard.
 
 ## Local smoke test
 

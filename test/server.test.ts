@@ -19,7 +19,8 @@ function buildTestConfig(baseUrl: string, overrides: DeepPartial<AppConfig> = {}
     bodyLimitBytes: 100 * 1024 * 1024,
     limits: {
       maxConcurrentGenerations: 1000,
-      maxConcurrentImageProcessing: 50
+      maxConcurrentImageProcessing: 50,
+      maxProcessRssBytes: 28 * 1024 * 1024 * 1024
     },
     upstream: {
       baseUrl,
@@ -240,6 +241,56 @@ test('POST /v1/images/generations queues when image processing limit is reached'
   assert.equal(health.json().active_generations, 0);
   assert.equal(health.json().active_image_processing, 0);
   assert.equal(health.json().max_concurrent_image_processing, 1);
+
+  await app.close();
+  await upstream.close();
+});
+
+test('POST /v1/images/generations returns 503 when process RSS guard is exceeded', async () => {
+  const upstream = Fastify();
+  let upstreamCalled = false;
+
+  upstream.post('/v1/images/generations', async () => {
+    upstreamCalled = true;
+    return {
+      created: 1780000000,
+      data: [
+        {
+          b64_json: tinyPngBase64
+        }
+      ]
+    };
+  });
+
+  await upstream.listen({ port: 0, host: '127.0.0.1' });
+  const upstreamAddress = upstream.server.address();
+  assert.ok(upstreamAddress && typeof upstreamAddress === 'object');
+  const port = (upstreamAddress as AddressInfo).port;
+
+  const app = buildServer(buildTestConfig(`http://127.0.0.1:${port}`, {
+    limits: {
+      maxProcessRssBytes: 1
+    }
+  }), {
+    uploadPngToR2: async ({ key }) => `https://img.example.com/${key}`
+  });
+
+  const response = await app.inject({
+    method: 'POST',
+    url: '/v1/images/generations',
+    headers: {
+      authorization: 'Bearer test-key',
+      'content-type': 'application/json'
+    },
+    payload: {
+      model: 'gpt-image-2-count',
+      prompt: 'test'
+    }
+  });
+
+  assert.equal(response.statusCode, 503);
+  assert.equal(response.json().error.code, 'server_memory_limit_exceeded');
+  assert.equal(upstreamCalled, false);
 
   await app.close();
   await upstream.close();

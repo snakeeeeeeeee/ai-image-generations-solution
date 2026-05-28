@@ -10,6 +10,7 @@ export interface AppConfig {
   limits: {
     maxConcurrentGenerations: number;
     maxConcurrentImageProcessing: number;
+    maxProcessRssBytes: number;
   };
   upstream: {
     baseUrl: string;
@@ -55,6 +56,10 @@ function parsePositiveInt(name: string, fallback: number): number {
   return value;
 }
 
+function parseMegabytes(name: string, fallback: number): number {
+  return parsePositiveInt(name, fallback) * 1024 * 1024;
+}
+
 function normalizeBaseUrl(value: string): string {
   return value.replace(/\/+$/, '');
 }
@@ -79,7 +84,8 @@ export function loadConfig(): AppConfig {
     bodyLimitBytes: parsePositiveInt('REQUEST_BODY_LIMIT_BYTES', DEFAULT_BODY_LIMIT_BYTES),
     limits: {
       maxConcurrentGenerations: parsePositiveInt('MAX_CONCURRENT_GENERATIONS', 1000),
-      maxConcurrentImageProcessing: parsePositiveInt('MAX_CONCURRENT_IMAGE_PROCESSING', 50)
+      maxConcurrentImageProcessing: parsePositiveInt('MAX_CONCURRENT_IMAGE_PROCESSING', 50),
+      maxProcessRssBytes: parseMegabytes('MAX_PROCESS_RSS_MB', 28 * 1024)
     },
     upstream: {
       baseUrl: normalizeBaseUrl(requireEnv('NEW_API_BASE_URL')),
