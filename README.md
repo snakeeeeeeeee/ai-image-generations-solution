@@ -24,6 +24,7 @@ Copy `.env.example` to `.env` and fill the secret values:
 
 ```env
 NEW_API_BASE_URL=http://127.0.0.1:3000
+MAX_CONCURRENT_GENERATIONS=50
 R2_ENDPOINT=https://<account-id>.r2.cloudflarestorage.com
 R2_ACCESS_KEY_ID=...
 R2_SECRET_ACCESS_KEY=...
@@ -44,6 +45,23 @@ Development:
 ```bash
 npm run dev
 ```
+
+## Memory and concurrency
+
+Image responses can temporarily hold the upstream JSON text, the base64 string,
+the decoded PNG buffer, and SDK upload buffers in memory. Keep a service-level
+concurrency cap even on large machines.
+
+Recommended starting point for a large server:
+
+```env
+MAX_CONCURRENT_GENERATIONS=50
+PM2_MAX_MEMORY_RESTART=30G
+NODE_MAX_OLD_SPACE_SIZE_MB=24576
+```
+
+If 4K PNGs are larger than expected, reduce `MAX_CONCURRENT_GENERATIONS`. If the
+server remains mostly idle during load tests, increase it gradually.
 
 ## Local smoke test
 

@@ -3,6 +3,7 @@ import { performance } from 'node:perf_hooks';
 import type { AppConfig } from './config.js';
 import { AppError, openAIError, sendAppError } from './errors.js';
 import { applyImageDefaults, assertPng, buildImageKey, decodeBase64Image, type ImageRequestBody } from './image.js';
+import { ActiveRequestLimiter } from './limiter.js';
 import { createR2Client, uploadPngToR2 } from './r2.js';
 
 interface UpstreamImageItem {
@@ -136,6 +137,7 @@ function sendUpstreamError(reply: FastifyReply, error: unknown): FastifyReply | 
 export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyInstance {
   const r2Client = createR2Client(config.r2);
   const upload = deps.uploadPngToR2 ?? uploadPngToR2;
+  const generationLimiter = new ActiveRequestLimiter(config.limits.maxConcurrentGenerations);
   const app = Fastify({
     logger: {
       level: config.logLevel,
@@ -146,11 +148,14 @@ export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyIn
   });
 
   app.get('/healthz', async () => ({
-    ok: true
+    ok: true,
+    active_generations: generationLimiter.active,
+    max_concurrent_generations: generationLimiter.max
   }));
 
   app.post('/v1/images/generations', async (request, reply) => {
     const totalStartedAt = performance.now();
+    let releaseGenerationSlot: (() => void) | undefined;
     const timings: Timings = {
       openai_ms: 0,
       decode_ms: 0,
@@ -167,6 +172,14 @@ export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyIn
       }
 
       const upstreamBody = applyImageDefaults(request.body, config.defaults);
+      releaseGenerationSlot = generationLimiter.tryAcquire() ?? undefined;
+      if (!releaseGenerationSlot) {
+        throw new AppError('Too many image generation requests in progress', {
+          statusCode: 429,
+          type: 'server_error',
+          code: 'too_many_generation_requests'
+        });
+      }
 
       const upstreamStartedAt = performance.now();
       const upstreamResponse = await callUpstream({ config, request, body: upstreamBody });
@@ -230,6 +243,8 @@ export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyIn
       const totalMs = msSince(totalStartedAt);
       request.log.info({
         request_id: request.id,
+        active_generations: generationLimiter.active,
+        max_concurrent_generations: generationLimiter.max,
         openai_ms: timings.openai_ms,
         decode_ms: timings.decode_ms,
         upload_ms: timings.upload_ms,
@@ -246,6 +261,8 @@ export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyIn
       request.log.error({
         request_id: request.id,
         err: error,
+        active_generations: generationLimiter.active,
+        max_concurrent_generations: generationLimiter.max,
         openai_ms: timings.openai_ms,
         decode_ms: timings.decode_ms,
         upload_ms: timings.upload_ms,
@@ -258,6 +275,8 @@ export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyIn
       }
 
       return sendAppError(reply, error);
+    } finally {
+      releaseGenerationSlot?.();
     }
   });
 

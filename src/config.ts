@@ -7,6 +7,9 @@ export interface AppConfig {
   host: string;
   logLevel: string;
   bodyLimitBytes: number;
+  limits: {
+    maxConcurrentGenerations: number;
+  };
   upstream: {
     baseUrl: string;
     imagesPath: string;
@@ -73,6 +76,9 @@ export function loadConfig(): AppConfig {
     host: optionalEnv('HOST', '0.0.0.0'),
     logLevel: optionalEnv('LOG_LEVEL', 'info'),
     bodyLimitBytes: parsePositiveInt('REQUEST_BODY_LIMIT_BYTES', DEFAULT_BODY_LIMIT_BYTES),
+    limits: {
+      maxConcurrentGenerations: parsePositiveInt('MAX_CONCURRENT_GENERATIONS', 50)
+    },
     upstream: {
       baseUrl: normalizeBaseUrl(requireEnv('NEW_API_BASE_URL')),
       imagesPath: normalizePath(optionalEnv('NEW_API_IMAGES_PATH', '/v1/images/generations')),
