@@ -32,6 +32,11 @@ function buildTestConfig(baseUrl: string, overrides: DeepPartial<AppConfig> = {}
       size: '2560x1440',
       outputFormat: 'png'
     },
+    upload: {
+      maxRetries: 3,
+      retryBaseDelayMs: 1,
+      retryMaxDelayMs: 5
+    },
     r2: {
       endpoint: 'http://127.0.0.1:1',
       accessKeyId: 'test',
@@ -66,6 +71,10 @@ function buildTestConfig(baseUrl: string, overrides: DeepPartial<AppConfig> = {}
     defaults: {
       ...base.defaults,
       ...overrides.defaults
+    },
+    upload: {
+      ...base.upload,
+      ...overrides.upload
     },
     r2: {
       ...base.r2,
@@ -267,6 +276,60 @@ test('POST /v1/images/edits forwards multipart image edit request and returns UR
 
   const body = await response.json() as { data: Array<{ url: string }> };
   assert.match(body.data[0]?.url ?? '', /^https:\/\/img\.example\.com\/images\/\d{4}\/\d{2}\/\d{2}\/.+\.png$/);
+
+  await app.close();
+  await upstream.close();
+});
+
+test('POST /v1/images/generations retries transient R2 upload failures', async () => {
+  const upstream = Fastify();
+  let attempts = 0;
+
+  upstream.post('/v1/images/generations', async () => ({
+    created: 1780000000,
+    data: [
+      {
+        b64_json: tinyPngBase64
+      }
+    ]
+  }));
+
+  await upstream.listen({ port: 0, host: '127.0.0.1' });
+  const upstreamAddress = upstream.server.address();
+  assert.ok(upstreamAddress && typeof upstreamAddress === 'object');
+  const port = (upstreamAddress as AddressInfo).port;
+
+  const app = buildServer(buildTestConfig(`http://127.0.0.1:${port}`, {
+    upload: {
+      maxRetries: 2,
+      retryBaseDelayMs: 1,
+      retryMaxDelayMs: 2
+    }
+  }), {
+    uploadPngToR2: async ({ key }) => {
+      attempts += 1;
+      if (attempts < 3) {
+        throw new Error('temporary upload failure');
+      }
+      return `https://img.example.com/${key}`;
+    }
+  });
+
+  const response = await app.inject({
+    method: 'POST',
+    url: '/v1/images/generations',
+    headers: {
+      authorization: 'Bearer test-key',
+      'content-type': 'application/json'
+    },
+    payload: {
+      model: 'gpt-image-2-count',
+      prompt: 'test'
+    }
+  });
+
+  assert.equal(response.statusCode, 200);
+  assert.equal(attempts, 3);
 
   await app.close();
   await upstream.close();

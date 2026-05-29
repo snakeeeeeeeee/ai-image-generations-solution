@@ -5,6 +5,7 @@ import {
   AlertTriangle,
   BarChart3,
   CheckCircle2,
+  CirclePause,
   Clock3,
   Copy,
   Database,
@@ -32,6 +33,8 @@ import {
 import './styles.css';
 
 interface RuntimeStats {
+  draining: boolean;
+  safeToRestart: boolean;
   activeGenerations: number;
   queuedGenerations: number;
   maxConcurrentGenerations: number;
@@ -219,6 +222,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
   const [imagePage, setImagePage] = useState(1);
   const [imagePageSize, setImagePageSize] = useState(10);
   const [error, setError] = useState('');
+  const [drainUpdating, setDrainUpdating] = useState(false);
 
   async function load(options: {
     silent?: boolean;
@@ -279,6 +283,28 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
     await fetch(adminPath('/logout'), { method: 'POST' });
     history.replaceState(null, '', adminPath('/login'));
     onLogout();
+  }
+
+  async function setDraining(draining: boolean) {
+    setDrainUpdating(true);
+    setError('');
+    try {
+      await fetchJson(adminPath('/api/drain'), {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json'
+        },
+        body: JSON.stringify({
+          draining,
+          reason: draining ? 'manual maintenance' : 'manual resume'
+        })
+      });
+      await load({ silent: true });
+    } catch {
+      setError('无法切换排空模式，请确认登录状态和服务运行状态。');
+    } finally {
+      setDrainUpdating(false);
+    }
   }
 
   function changeRequestPage(page: number) {
@@ -343,13 +369,39 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
 
       {data ? (
         <>
+          <section className={`maintenance-panel ${data.runtime.draining ? 'draining' : ''}`}>
+            <div className="maintenance-copy">
+              <div className="maintenance-icon">
+                <CirclePause size={20} />
+              </div>
+              <div>
+                <h2>{data.runtime.draining ? '排空模式已开启' : '排空模式未开启'}</h2>
+                <p>
+                  {data.runtime.draining
+                    ? data.runtime.safeToRestart
+                      ? '当前没有活跃生成或处理队列，可以安全重启或升级。'
+                      : '新图片请求已拒绝，已有请求会继续处理，等待队列清空后再重启。'
+                    : '开启后会拒绝新的文生图/图生图请求，已有请求继续完成。'}
+                </p>
+              </div>
+            </div>
+            <button
+              className={data.runtime.draining ? 'ghost-button' : 'danger-button'}
+              disabled={drainUpdating}
+              onClick={() => void setDraining(!data.runtime.draining)}
+            >
+              {drainUpdating ? <Loader2 className="spin" size={17} /> : <CirclePause size={17} />}
+              {data.runtime.draining ? '退出排空模式' : '进入排空模式'}
+            </button>
+          </section>
+
           <section className="status-grid">
             <StatusTile
               icon={<Server size={19} />}
               label="服务状态"
-              value={memoryPercent >= 90 ? '内存高水位' : '运行正常'}
-              tone={memoryPercent >= 90 ? 'warning' : 'success'}
-              detail={`RSS ${formatBytes(data.runtime.memory.rssBytes)} / ${formatBytes(data.runtime.memory.maxRssBytes)}`}
+              value={data.runtime.draining ? '排空中' : memoryPercent >= 90 ? '内存高水位' : '运行正常'}
+              tone={data.runtime.draining ? 'warning' : memoryPercent >= 90 ? 'warning' : 'success'}
+              detail={data.runtime.safeToRestart ? '可安全重启' : `RSS ${formatBytes(data.runtime.memory.rssBytes)} / ${formatBytes(data.runtime.memory.maxRssBytes)}`}
             />
             <StatusTile
               icon={<Activity size={19} />}

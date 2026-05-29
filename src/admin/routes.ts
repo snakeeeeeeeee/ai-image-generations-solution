@@ -22,6 +22,11 @@ interface PageQuery {
   page_size?: string;
 }
 
+interface DrainBody {
+  draining?: boolean;
+  reason?: string;
+}
+
 export function registerAdminRoutes(app: FastifyInstance, options: AdminRoutesOptions): void {
   app.register(cookie);
 
@@ -69,6 +74,25 @@ export function registerAdminRoutes(app: FastifyInstance, options: AdminRoutesOp
     runtime: options.getRuntimeStats(),
     summary: options.store.getSummary()
   }));
+
+  app.get(route('/api/drain'), {
+    preHandler: async (request, reply) => requireAdmin(options.config, request, reply)
+  }, async () => ({
+    data: options.store.getDrainState()
+  }));
+
+  app.post(route('/api/drain'), {
+    preHandler: async (request, reply) => requireAdmin(options.config, request, reply)
+  }, async (request: FastifyRequest<{ Body: DrainBody }>) => {
+    const state = options.store.setDrainState({
+      draining: request.body?.draining === true,
+      reason: typeof request.body?.reason === 'string' ? request.body.reason.slice(0, 200) : undefined
+    });
+
+    return {
+      data: state
+    };
+  });
 
   app.get(route('/api/requests'), {
     preHandler: async (request, reply) => requireAdmin(options.config, request, reply)

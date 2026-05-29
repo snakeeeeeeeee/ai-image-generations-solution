@@ -24,6 +24,11 @@ export interface AppConfig {
     size: string;
     outputFormat: 'png';
   };
+  upload: {
+    maxRetries: number;
+    retryBaseDelayMs: number;
+    retryMaxDelayMs: number;
+  };
   r2: R2Config;
   admin: AdminConfig;
 }
@@ -105,6 +110,11 @@ export function loadConfig(): AppConfig {
     defaults: {
       size: optionalEnv('DEFAULT_IMAGE_SIZE', '2560x1440'),
       outputFormat: normalizePngFormat(optionalEnv('DEFAULT_OUTPUT_FORMAT', 'png'))
+    },
+    upload: {
+      maxRetries: parsePositiveInt('R2_UPLOAD_MAX_RETRIES', 3),
+      retryBaseDelayMs: parsePositiveInt('R2_UPLOAD_RETRY_BASE_DELAY_MS', 300),
+      retryMaxDelayMs: parsePositiveInt('R2_UPLOAD_RETRY_MAX_DELAY_MS', 3000)
     },
     r2: {
       endpoint: normalizeBaseUrl(requireEnv('R2_ENDPOINT')),

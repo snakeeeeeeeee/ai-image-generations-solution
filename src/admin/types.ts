@@ -8,6 +8,12 @@ export interface AdminConfig {
   cookieSecure: boolean;
 }
 
+export interface AdminDrainState {
+  draining: boolean;
+  updatedAt?: string;
+  reason?: string;
+}
+
 export interface ImageRequestRecord {
   requestId: string;
   createdAt: string;
@@ -28,6 +34,8 @@ export interface ImageRequestRecord {
 }
 
 export interface AdminRuntimeStats {
+  draining: boolean;
+  safeToRestart: boolean;
   activeGenerations: number;
   queuedGenerations: number;
   maxConcurrentGenerations: number;

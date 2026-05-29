@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
-import type { ImageRequestRecord } from './types.js';
+import type { AdminDrainState, ImageRequestRecord } from './types.js';
 
 interface RequestRow {
   request_id: string;
@@ -69,6 +69,11 @@ export class AdminStore {
 
       CREATE INDEX IF NOT EXISTS idx_image_requests_error_code
         ON image_requests(error_code);
+
+      CREATE TABLE IF NOT EXISTS runtime_state (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      );
     `);
 
     this.#ensureColumn('image_requests', 'operation', "TEXT NOT NULL DEFAULT 'generation'");
@@ -139,6 +144,44 @@ export class AdminStore {
       error_message: truncateText(record.errorMessage, 500),
       image_urls_json: JSON.stringify(record.imageUrls)
     });
+  }
+
+  getDrainState(): AdminDrainState {
+    const row = this.#db.prepare('SELECT value FROM runtime_state WHERE key = ?').get('drain') as { value: string } | undefined;
+    if (!row) {
+      return {
+        draining: false
+      };
+    }
+
+    try {
+      const parsed = JSON.parse(row.value) as AdminDrainState;
+      return {
+        draining: Boolean(parsed.draining),
+        updatedAt: typeof parsed.updatedAt === 'string' ? parsed.updatedAt : undefined,
+        reason: typeof parsed.reason === 'string' ? parsed.reason : undefined
+      };
+    } catch {
+      return {
+        draining: false
+      };
+    }
+  }
+
+  setDrainState(state: AdminDrainState): AdminDrainState {
+    const nextState: AdminDrainState = {
+      draining: state.draining,
+      updatedAt: new Date().toISOString(),
+      reason: state.reason
+    };
+
+    this.#db.prepare(`
+      INSERT INTO runtime_state (key, value)
+      VALUES (?, ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value
+    `).run('drain', JSON.stringify(nextState));
+
+    return nextState;
   }
 
   cleanup(retentionDays: number): number {

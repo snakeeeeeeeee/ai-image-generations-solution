@@ -35,6 +35,9 @@ R2_ACCESS_KEY_ID=...
 R2_SECRET_ACCESS_KEY=...
 R2_BUCKET=<bucket-name>
 R2_PUBLIC_URL=https://<public-image-domain>
+R2_UPLOAD_MAX_RETRIES=3
+R2_UPLOAD_RETRY_BASE_DELAY_MS=300
+R2_UPLOAD_RETRY_MAX_DELAY_MS=3000
 ADMIN_PASSWORD=<admin-console-password>
 ADMIN_SESSION_SECRET=<long-random-session-secret>
 ADMIN_DB_PATH=./data/admin.sqlite
@@ -202,6 +205,10 @@ Response:
 - Uploaded object headers:
   - `Content-Type: image/png`
   - `Cache-Control: public, max-age=86400`
+- Upload retry:
+  - `R2_UPLOAD_MAX_RETRIES=3`
+  - `R2_UPLOAD_RETRY_BASE_DELAY_MS=300`
+  - `R2_UPLOAD_RETRY_MAX_DELAY_MS=3000`
 
 ## Admin dashboard
 
@@ -229,6 +236,11 @@ image URLs. For upstream failures, it also stores the upstream error message
 truncated to 500 characters. It does not store prompts, uploaded source images, masks,
 Authorization headers, R2 secrets, or new-api keys.
 
+The dashboard also includes drain mode for maintenance. When enabled, existing
+image requests continue running, but new generation/edit requests return
+`503 service_draining` with `Retry-After: 120`. Restart only after the dashboard
+shows that the service is safe to restart.
+
 Dashboard APIs:
 
 ```text
@@ -236,6 +248,8 @@ GET  /image-wrapper/admin/login
 POST /image-wrapper/admin/login
 POST /image-wrapper/admin/logout
 GET  /image-wrapper/admin/api/summary
+GET  /image-wrapper/admin/api/drain
+POST /image-wrapper/admin/api/drain
 GET  /image-wrapper/admin/api/requests
 GET  /image-wrapper/admin/api/errors
 ```

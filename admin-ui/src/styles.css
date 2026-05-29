@@ -174,7 +174,8 @@ h2 {
 }
 
 .login-form button,
-.ghost-button {
+.ghost-button,
+.danger-button {
   min-height: 42px;
   border-radius: 8px;
   border: 1px solid var(--border-strong);
@@ -231,6 +232,12 @@ h2 {
   padding: 0 14px;
 }
 
+.danger-button {
+  background: var(--danger-text);
+  color: #ffffff;
+  padding: 0 14px;
+}
+
 .refresh-select {
   min-height: 42px;
   display: inline-flex;
@@ -272,6 +279,53 @@ h2 {
 .metric-grid {
   display: grid;
   gap: 14px;
+}
+
+.maintenance-panel {
+  min-height: 74px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 16px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  margin-bottom: 14px;
+}
+
+.maintenance-panel.draining {
+  border-color: rgba(180, 83, 9, 0.45);
+  background: var(--warning-bg);
+}
+
+.maintenance-copy {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.maintenance-icon {
+  width: 42px;
+  height: 42px;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  color: var(--warning-text);
+  background: var(--surface-solid);
+  border: 1px solid var(--border);
+}
+
+.maintenance-copy h2 {
+  margin: 0 0 2px;
+}
+
+.maintenance-copy p {
+  margin: 0;
+  color: var(--text-muted);
 }
 
 .status-grid {
@@ -614,6 +668,7 @@ th {
 
   .topbar-actions {
     width: 100%;
+    flex-wrap: wrap;
   }
 
   .ghost-button {
@@ -623,6 +678,15 @@ th {
   .refresh-select {
     width: 100%;
     justify-content: space-between;
+  }
+
+  .maintenance-panel {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .maintenance-panel button {
+    width: 100%;
   }
 
   .pagination {

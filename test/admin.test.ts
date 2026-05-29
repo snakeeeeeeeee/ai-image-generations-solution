@@ -33,6 +33,11 @@ function buildTestConfig(baseUrl: string, overrides: DeepPartial<AppConfig> = {}
       size: '2560x1440',
       outputFormat: 'png'
     },
+    upload: {
+      maxRetries: 3,
+      retryBaseDelayMs: 1,
+      retryMaxDelayMs: 5
+    },
     r2: {
       endpoint: 'http://127.0.0.1:1',
       accessKeyId: 'test',
@@ -67,6 +72,10 @@ function buildTestConfig(baseUrl: string, overrides: DeepPartial<AppConfig> = {}
     defaults: {
       ...base.defaults,
       ...overrides.defaults
+    },
+    upload: {
+      ...base.upload,
+      ...overrides.upload
     },
     r2: {
       ...base.r2,
@@ -157,6 +166,75 @@ test('admin login succeeds and protects API routes', async () => {
   });
   assert.equal(authenticated.statusCode, 200);
   assert.equal(typeof authenticated.json().runtime.activeGenerations, 'number');
+
+  await app.close();
+  await upstream.close();
+});
+
+test('admin drain mode rejects new image requests and reports safe restart state', async () => {
+  const upstream = await buildUpstream();
+  const app = buildServer(buildTestConfig(upstream.baseUrl), {
+    uploadPngToR2: async ({ key }) => `https://img.example.com/${key}`
+  });
+
+  const login = await app.inject({
+    method: 'POST',
+    url: '/image-wrapper/admin/login',
+    payload: {
+      password: 'admin-pass'
+    }
+  });
+  const cookie = getCookie(login.headers['set-cookie']);
+
+  const enableDrain = await app.inject({
+    method: 'POST',
+    url: '/image-wrapper/admin/api/drain',
+    headers: {
+      cookie
+    },
+    payload: {
+      draining: true,
+      reason: 'test maintenance'
+    }
+  });
+  assert.equal(enableDrain.statusCode, 200);
+  assert.equal(enableDrain.json().data.draining, true);
+
+  const summary = await app.inject({
+    method: 'GET',
+    url: '/image-wrapper/admin/api/summary',
+    headers: {
+      cookie
+    }
+  });
+  assert.equal(summary.statusCode, 200);
+  assert.equal(summary.json().runtime.draining, true);
+  assert.equal(summary.json().runtime.safeToRestart, true);
+
+  const imageResponse = await app.inject({
+    method: 'POST',
+    url: '/v1/images/generations',
+    headers: {
+      authorization: 'Bearer secret-new-api-key'
+    },
+    payload: {
+      model: 'gpt-image-2-count',
+      prompt: 'test'
+    }
+  });
+  assert.equal(imageResponse.statusCode, 503);
+  assert.equal(imageResponse.headers['retry-after'], '120');
+  assert.equal(imageResponse.json().error.code, 'service_draining');
+
+  const records = await app.inject({
+    method: 'GET',
+    url: '/image-wrapper/admin/api/requests?page=1&page_size=10',
+    headers: {
+      cookie
+    }
+  });
+  assert.equal(records.statusCode, 200);
+  assert.equal(records.json().data[0].errorCode, 'service_draining');
 
   await app.close();
   await upstream.close();

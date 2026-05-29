@@ -66,10 +66,19 @@ interface ServerDeps {
 function runtimeStats(
   config: AppConfig,
   generationLimiter: ActiveRequestLimiter,
-  imageProcessingLimiter: ActiveRequestLimiter
+  imageProcessingLimiter: ActiveRequestLimiter,
+  adminStore: AdminStore
 ): AdminRuntimeStats {
   const memory = getMemorySnapshot(config);
+  const drainState = adminStore.getDrainState();
+  const activeWork =
+    generationLimiter.active +
+    generationLimiter.queued +
+    imageProcessingLimiter.active +
+    imageProcessingLimiter.queued;
   return {
+    draining: drainState.draining,
+    safeToRestart: drainState.draining && activeWork === 0,
     activeGenerations: generationLimiter.active,
     queuedGenerations: generationLimiter.queued,
     maxConcurrentGenerations: generationLimiter.max,
@@ -232,6 +241,15 @@ function upstreamUrl(config: AppConfig, operation: ImageOperation): string {
 
 function msSince(startedAt: number): number {
   return Math.round(performance.now() - startedAt);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function retryDelayMs(config: AppConfig, retryIndex: number): number {
+  const delay = config.upload.retryBaseDelayMs * 2 ** retryIndex;
+  return Math.min(config.upload.retryMaxDelayMs, delay);
 }
 
 function formatBeijingTime(unixSeconds: number): string {
@@ -427,6 +445,54 @@ function sendUpstreamError(reply: FastifyReply, error: unknown): FastifyReply | 
   return reply.status(error.statusCode).send(openAIError(error.message, error.type, error.code));
 }
 
+async function uploadWithRetry({
+  upload,
+  request,
+  r2Client,
+  config,
+  key,
+  buffer
+}: {
+  upload: UploadPngToR2;
+  request: FastifyRequest;
+  r2Client: ReturnType<typeof createR2Client>;
+  config: AppConfig;
+  key: string;
+  buffer: Buffer;
+}): Promise<string> {
+  let lastError: unknown;
+  const maxAttempts = config.upload.maxRetries + 1;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      return await upload({
+        client: r2Client,
+        config: config.r2,
+        key,
+        buffer
+      });
+    } catch (error) {
+      lastError = error;
+      if (attempt >= maxAttempts) {
+        break;
+      }
+
+      const delayMs = retryDelayMs(config, attempt - 1);
+      request.log.warn({
+        request_id: request.id,
+        attempt,
+        next_attempt: attempt + 1,
+        max_attempts: maxAttempts,
+        retry_delay_ms: delayMs,
+        r2: r2ErrorDetails(error)
+      }, 'r2 upload attempt failed, retrying');
+      await sleep(delayMs);
+    }
+  }
+
+  throw lastError;
+}
+
 export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyInstance {
   const r2Client = createR2Client(config.r2);
   const upload = deps.uploadPngToR2 ?? uploadPngToR2;
@@ -465,11 +531,12 @@ export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyIn
   registerAdminRoutes(app, {
     config: config.admin,
     store: adminStore,
-    getRuntimeStats: () => runtimeStats(config, generationLimiter, imageProcessingLimiter)
+    getRuntimeStats: () => runtimeStats(config, generationLimiter, imageProcessingLimiter, adminStore)
   });
 
   app.get('/healthz', async () => ({
     ok: true,
+    draining: adminStore.getDrainState().draining,
     active_generations: generationLimiter.active,
     queued_generations: generationLimiter.queued,
     max_concurrent_generations: generationLimiter.max,
@@ -504,6 +571,15 @@ export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyIn
           statusCode: 401,
           type: 'invalid_request_error',
           code: 'missing_authorization'
+        });
+      }
+
+      if (adminStore.getDrainState().draining) {
+        reply.header('Retry-After', '120');
+        throw new AppError('Service is draining for maintenance, retry later', {
+          statusCode: 503,
+          type: 'server_error',
+          code: 'service_draining'
         });
       }
 
@@ -566,9 +642,11 @@ export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyIn
         const uploadStartedAt = performance.now();
         let url: string;
         try {
-          url = await upload({
-            client: r2Client,
-            config: config.r2,
+          url = await uploadWithRetry({
+            upload,
+            request,
+            r2Client,
+            config,
             key,
             buffer
           });
