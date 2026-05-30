@@ -9,6 +9,7 @@ import {
   Clock3,
   Copy,
   Database,
+  Eye,
   ImageIcon,
   Link as LinkIcon,
   Loader2,
@@ -18,6 +19,7 @@ import {
   RefreshCw,
   Server,
   UploadCloud,
+  X,
   XCircle
 } from 'lucide-react';
 import {
@@ -643,83 +645,173 @@ function RequestTable({ page, onPageChange, onPageSizeChange }: {
   onPageChange: (page: number) => void;
   onPageSizeChange: (pageSize: number) => void;
 }) {
+  const [detailRequest, setDetailRequest] = useState<RequestRecord | null>(null);
+
   return (
-    <section className="panel table-panel">
-      <div className="panel-heading">
-        <div>
-          <h2>最近请求</h2>
-          <p>仅保存排障指标，不保存 prompt 和密钥。</p>
+    <>
+      <section className="panel table-panel">
+        <div className="panel-heading">
+          <div>
+            <h2>最近请求</h2>
+            <p>仅保存排障指标，不保存 prompt 和密钥。</p>
+          </div>
         </div>
-      </div>
-      <div className="table-scroll">
-        <table>
-          <thead>
-            <tr>
-              <th>时间</th>
-              <th>类型</th>
-              <th>状态</th>
-              <th>模型</th>
-              <th>尺寸</th>
-              <th>总耗时</th>
-              <th>OpenAI</th>
-              <th>解码</th>
-              <th>上传</th>
-              <th>图片</th>
-              <th>请求关键参数</th>
-              <th>返回关键参数</th>
-              <th>错误</th>
-              <th>错误详情</th>
-              <th>URL</th>
-            </tr>
-          </thead>
-          <tbody>
-            {page.data.length === 0 ? (
+        <div className="table-scroll">
+          <table>
+            <thead>
               <tr>
-                <td colSpan={15} className="table-empty">暂无请求记录</td>
+                <th>时间</th>
+                <th>类型</th>
+                <th>状态</th>
+                <th>模型</th>
+                <th>尺寸</th>
+                <th>总耗时</th>
+                <th>OpenAI</th>
+                <th>解码</th>
+                <th>上传</th>
+                <th>图片</th>
+                <th>请求关键参数</th>
+                <th>返回关键参数</th>
+                <th>错误</th>
+                <th>错误详情</th>
+                <th>URL</th>
               </tr>
-            ) : page.data.map((request) => (
-              <tr key={request.requestId}>
-                <td>{formatDate(request.createdAt)}</td>
-                <td>
-                  <span className="status-pill neutral">{operationLabel(request.operation)}</span>
-                </td>
-                <td>
-                  <span className={`status-pill ${request.success ? 'ok' : 'bad'}`}>
-                    {request.success ? <CheckCircle2 size={13} /> : <XCircle size={13} />}
-                    {request.statusCode}
-                  </span>
-                </td>
-                <td>{request.model ?? '-'}</td>
-                <td>{request.size ?? '-'}</td>
-                <td>{formatMs(request.totalMs)}</td>
-                <td>{formatMs(request.openaiMs)}</td>
-                <td>{formatMs(request.decodeMs)}</td>
-                <td>{formatMs(request.uploadMs)}</td>
-                <td>{request.imageCount} / {formatBytes(request.imageBytes)}</td>
-                <td className="params-cell">
-                  <span title={formatParams(request.requestParams)}>{formatParams(request.requestParams)}</span>
-                </td>
-                <td className="params-cell">
-                  <span title={formatParams(request.responseParams)}>{formatParams(request.responseParams)}</span>
-                </td>
-                <td>{request.errorCode ?? '-'}</td>
-                <td className="error-message-cell">
-                  <span title={request.errorMessage ?? ''}>{request.errorMessage ?? '-'}</span>
-                </td>
-                <td>
-                  {request.imageUrls[0] ? (
-                    <button className="icon-button" onClick={() => void navigator.clipboard.writeText(request.imageUrls[0] ?? '')} title="复制 URL">
-                      <Copy size={14} />
-                    </button>
-                  ) : '-'}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {page.data.length === 0 ? (
+                <tr>
+                  <td colSpan={15} className="table-empty">暂无请求记录</td>
+                </tr>
+              ) : page.data.map((request) => {
+                const hasMismatch = getParamMismatchReasons(request).length > 0;
+                return (
+                  <tr key={request.requestId}>
+                    <td>{formatDate(request.createdAt)}</td>
+                    <td>
+                      <span className="status-pill neutral">{operationLabel(request.operation)}</span>
+                    </td>
+                    <td>
+                      <span className={`status-pill ${request.success ? 'ok' : 'bad'}`}>
+                        {request.success ? <CheckCircle2 size={13} /> : <XCircle size={13} />}
+                        {request.statusCode}
+                      </span>
+                    </td>
+                    <td>{request.model ?? '-'}</td>
+                    <td>{request.size ?? '-'}</td>
+                    <td>{formatMs(request.totalMs)}</td>
+                    <td>{formatMs(request.openaiMs)}</td>
+                    <td>{formatMs(request.decodeMs)}</td>
+                    <td>{formatMs(request.uploadMs)}</td>
+                    <td>{request.imageCount} / {formatBytes(request.imageBytes)}</td>
+                    <td className={hasMismatch ? 'params-cell params-cell-warning' : 'params-cell'}>
+                      <ParamCell
+                        summary={formatRequestParamSummary(request.requestParams)}
+                        onView={() => setDetailRequest(request)}
+                      />
+                    </td>
+                    <td className={hasMismatch ? 'params-cell params-cell-warning' : 'params-cell'}>
+                      <ParamCell
+                        summary={formatResponseParamSummary(request.responseParams)}
+                        onView={() => setDetailRequest(request)}
+                      />
+                    </td>
+                    <td>{request.errorCode ?? '-'}</td>
+                    <td className="error-message-cell">
+                      <span title={request.errorMessage ?? ''}>{request.errorMessage ?? '-'}</span>
+                    </td>
+                    <td>
+                      {request.imageUrls[0] ? (
+                        <button className="icon-button" onClick={() => void navigator.clipboard.writeText(request.imageUrls[0] ?? '')} title="复制 URL">
+                          <Copy size={14} />
+                        </button>
+                      ) : '-'}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+        <Pagination page={page} onPageChange={onPageChange} onPageSizeChange={onPageSizeChange} />
+      </section>
+      {detailRequest ? <ParamDetailsModal request={detailRequest} onClose={() => setDetailRequest(null)} /> : null}
+    </>
+  );
+}
+
+function ParamCell({ summary, onView }: { summary: string; onView: () => void }) {
+  return (
+    <div className="params-summary">
+      <span>{summary}</span>
+      <button className="mini-action-button" type="button" onClick={onView}>
+        <Eye size={13} />
+        查看
+      </button>
+    </div>
+  );
+}
+
+function ParamDetailsModal({ request, onClose }: { request: RequestRecord; onClose: () => void }) {
+  const mismatchReasons = getParamMismatchReasons(request);
+
+  useEffect(() => {
+    function closeOnEscape(event: KeyboardEvent) {
+      if (event.key === 'Escape') {
+        onClose();
+      }
+    }
+    window.addEventListener('keydown', closeOnEscape);
+    return () => window.removeEventListener('keydown', closeOnEscape);
+  }, [onClose]);
+
+  return (
+    <div className="modal-backdrop" role="presentation" onMouseDown={(event) => {
+      if (event.currentTarget === event.target) {
+        onClose();
+      }
+    }}>
+      <section className="params-modal" role="dialog" aria-modal="true" aria-labelledby="params-modal-title">
+        <div className="modal-header">
+          <div>
+            <p className="eyebrow">参数详情</p>
+            <h2 id="params-modal-title">{operationLabel(request.operation)}请求对比</h2>
+            <span>{formatDate(request.createdAt)} · {request.requestId}</span>
+          </div>
+          <button className="icon-button" type="button" onClick={onClose} title="关闭">
+            <X size={16} />
+          </button>
+        </div>
+
+        {mismatchReasons.length > 0 ? (
+          <div className="params-diff-alert">
+            <AlertTriangle size={16} />
+            <span>{mismatchReasons.join('，')}</span>
+          </div>
+        ) : null}
+
+        <div className="params-json-grid">
+          <JsonPanel title="请求关键参数" value={request.requestParams} />
+          <JsonPanel title="返回关键参数" value={request.responseParams} />
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function JsonPanel({ title, value }: { title: string; value: Record<string, unknown> | undefined }) {
+  const json = formatJson(value);
+
+  return (
+    <article className="json-panel">
+      <div className="json-panel-header">
+        <h3>{title}</h3>
+        <button className="mini-action-button" type="button" onClick={() => void navigator.clipboard.writeText(json)}>
+          <Copy size={13} />
+          复制
+        </button>
       </div>
-      <Pagination page={page} onPageChange={onPageChange} onPageSizeChange={onPageSizeChange} />
-    </section>
+      <pre>{json}</pre>
+    </article>
   );
 }
 
@@ -817,15 +909,66 @@ function formatNumber(value: number): string {
   return new Intl.NumberFormat('zh-CN').format(value);
 }
 
-function formatParams(params: Record<string, unknown> | undefined): string {
+function getScalarParam(params: Record<string, unknown> | undefined, key: string): string | undefined {
+  const value = params?.[key];
+  return ['string', 'number', 'boolean'].includes(typeof value) ? String(value) : undefined;
+}
+
+function formatParamParts(params: Record<string, unknown> | undefined, keys: string[]): string {
   if (!params || Object.keys(params).length === 0) {
     return '-';
   }
 
-  return Object.entries(params)
-    .filter(([, value]) => ['string', 'number', 'boolean'].includes(typeof value))
-    .map(([key, value]) => `${key}: ${String(value)}`)
-    .join(', ');
+  const parts = keys
+    .map((key) => {
+      const value = getScalarParam(params, key);
+      return value === undefined ? undefined : `${key}:${value}`;
+    })
+    .filter((part): part is string => Boolean(part));
+
+  return parts.length > 0 ? parts.join(' | ') : '-';
+}
+
+function formatRequestParamSummary(params: Record<string, unknown> | undefined): string {
+  return formatParamParts(params, ['model', 'n', 'size', 'quality', 'output_format', 'output_compression']);
+}
+
+function formatResponseParamSummary(params: Record<string, unknown> | undefined): string {
+  if (!params || Object.keys(params).length === 0) {
+    return '-';
+  }
+
+  const format = getScalarParam(params, 'format');
+  const size = getScalarParam(params, 'size');
+  const bytes = typeof params.bytes === 'number' ? formatBytes(params.bytes) : undefined;
+  const count = getScalarParam(params, 'count');
+  const parts = [format, size, bytes, count ? `count:${count}` : undefined].filter((part): part is string => Boolean(part));
+  return parts.length > 0 ? parts.join(' | ') : '-';
+}
+
+function getParamMismatchReasons(request: RequestRecord): string[] {
+  const reasons: string[] = [];
+  const requestSize = getScalarParam(request.requestParams, 'size');
+  const responseSize = getScalarParam(request.responseParams, 'size');
+  const requestCount = getScalarParam(request.requestParams, 'n');
+  const responseCount = getScalarParam(request.responseParams, 'count');
+
+  if (requestSize && responseSize && requestSize !== responseSize) {
+    reasons.push(`尺寸不一致：请求 ${requestSize}，返回 ${responseSize}`);
+  }
+  if (requestCount && responseCount && requestCount !== responseCount) {
+    reasons.push(`数量不一致：请求 ${requestCount}，返回 ${responseCount}`);
+  }
+
+  return reasons;
+}
+
+function formatJson(value: Record<string, unknown> | undefined): string {
+  if (!value || Object.keys(value).length === 0) {
+    return '{}';
+  }
+
+  return JSON.stringify(value, null, 2);
 }
 
 function formatDate(value: string): string {
