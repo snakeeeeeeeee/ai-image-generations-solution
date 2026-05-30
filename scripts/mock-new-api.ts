@@ -8,7 +8,7 @@ const app = Fastify({
 });
 
 // A tiny valid PNG. This is enough to verify decode, upload, and public URL flow.
-const tinyPngBase64 = 'iVBORw0KGgo=';
+const tinyPngBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=';
 
 app.get('/healthz', async () => ({
   ok: true

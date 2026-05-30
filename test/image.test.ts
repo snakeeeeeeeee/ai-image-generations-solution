@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { applyImageDefaults, assertPng, buildImageKey, decodeBase64Image } from '../src/image.js';
+import { applyImageDefaults, assertPng, buildImageKey, decodeBase64Image, readPngMetadata } from '../src/image.js';
 
-const tinyPngBase64 = 'iVBORw0KGgo=';
+const tinyPngBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=';
 
 test('applyImageDefaults forces PNG output and default size', () => {
   const body = applyImageDefaults({
@@ -21,6 +21,15 @@ test('applyImageDefaults forces PNG output and default size', () => {
 test('decodeBase64Image decodes valid data URL base64', () => {
   const buffer = decodeBase64Image(`data:image/png;base64,${tinyPngBase64}`);
   assert.equal(buffer.subarray(0, 8).toString('hex'), '89504e470d0a1a0a');
+});
+
+test('readPngMetadata reads PNG dimensions', () => {
+  const buffer = decodeBase64Image(tinyPngBase64);
+  assert.deepEqual(readPngMetadata(buffer), {
+    format: 'png',
+    width: 1,
+    height: 1
+  });
 });
 
 test('decodeBase64Image rejects invalid base64', () => {

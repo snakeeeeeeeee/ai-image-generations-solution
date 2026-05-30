@@ -6,7 +6,7 @@ import { AdminStore } from './admin/store.js';
 import type { AdminRuntimeStats, ImageRequestRecord } from './admin/types.js';
 import type { AppConfig } from './config.js';
 import { AppError, openAIError, sendAppError } from './errors.js';
-import { applyImageDefaults, assertPng, buildImageKey, decodeBase64Image, type ImageRequestBody } from './image.js';
+import { applyImageDefaults, buildImageKey, decodeBase64Image, readPngMetadata, type ImageRequestBody } from './image.js';
 import { ActiveRequestLimiter } from './limiter.js';
 import { createR2Client, uploadPngToR2 } from './r2.js';
 
@@ -56,6 +56,7 @@ interface UpstreamRequestPayload {
     model?: string;
     size?: string;
   };
+  requestParams: Record<string, unknown>;
 }
 
 interface ServerDeps {
@@ -108,6 +109,56 @@ function getRequestMetadata(body: ImageRequestBody | undefined): { model?: strin
     model: typeof body?.model === 'string' ? body.model : undefined,
     size: typeof body?.size === 'string' ? body.size : undefined
   };
+}
+
+function addParamIfPresent(params: Record<string, unknown>, key: string, value: unknown): void {
+  if (['string', 'number', 'boolean'].includes(typeof value)) {
+    params[key] = value;
+  }
+}
+
+function buildRequestParamsFromBody(body: ImageRequestBody): Record<string, unknown> {
+  const params: Record<string, unknown> = {};
+  for (const key of ['model', 'n', 'size', 'quality', 'output_format', 'output_compression']) {
+    addParamIfPresent(params, key, body[key]);
+  }
+  return params;
+}
+
+function buildRequestParamsFromFields(fields: Map<string, string>): Record<string, unknown> {
+  const params: Record<string, unknown> = {};
+  for (const key of ['model', 'n', 'size', 'quality', 'output_format', 'output_compression']) {
+    addParamIfPresent(params, key, fields.get(key));
+  }
+  return params;
+}
+
+function addResponseParam(params: Record<string, unknown>, key: string, value: unknown): void {
+  if (['string', 'number', 'boolean'].includes(typeof value)) {
+    params[key] = value;
+  }
+}
+
+function buildResponseParams(
+  upstreamResponse: UpstreamImageResponse,
+  outputImages: Array<{ width: number; height: number; bytes: number; format: string }>
+): Record<string, unknown> {
+  const params: Record<string, unknown> = {};
+  addResponseParam(params, 'created', upstreamResponse.created);
+
+  const firstImage = outputImages[0];
+  if (firstImage) {
+    params.format = firstImage.format;
+    params.width = firstImage.width;
+    params.height = firstImage.height;
+    params.size = `${firstImage.width}x${firstImage.height}`;
+    params.bytes = firstImage.bytes;
+  }
+  if (outputImages.length > 0) {
+    params.count = outputImages.length;
+  }
+
+  return params;
 }
 
 function getFieldMetadata(fields: Map<string, string>): { model?: string; size?: string } {
@@ -360,7 +411,8 @@ async function buildJsonUpstreamPayload(
     headers: {
       'content-type': 'application/json'
     },
-    metadata: getRequestMetadata(body)
+    metadata: getRequestMetadata(body),
+    requestParams: buildRequestParamsFromBody(body)
   };
 }
 
@@ -408,11 +460,13 @@ async function buildMultipartUpstreamPayload(
     fields.set('size', config.defaults.size);
   }
   form.set('output_format', config.defaults.outputFormat);
+  fields.set('output_format', config.defaults.outputFormat);
 
   return {
     body: form,
     headers: {},
-    metadata: getFieldMetadata(fields)
+    metadata: getFieldMetadata(fields),
+    requestParams: buildRequestParamsFromFields(fields)
   };
 }
 
@@ -556,6 +610,8 @@ export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyIn
     let releaseImageProcessingSlot: (() => void) | undefined;
     let stopUpstreamTimeout: (() => void) | undefined;
     let metadata: { model?: string; size?: string } = {};
+    let requestParams: Record<string, unknown> = {};
+    let responseParams: Record<string, unknown> = {};
     let totalImageBytes = 0;
     let imageCount = 0;
     let imageUrls: string[] = [];
@@ -595,6 +651,7 @@ export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyIn
 
       const upstreamPayload = await buildUpstreamPayload({ request, config, operation });
       metadata = upstreamPayload.metadata;
+      requestParams = upstreamPayload.requestParams;
       assertMemoryAvailable(config);
 
       const upstreamStartedAt = performance.now();
@@ -614,6 +671,7 @@ export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyIn
       stopUpstreamTimeout = undefined;
 
       const outputData: Array<{ url: string }> = [];
+      const outputImages: Array<{ width: number; height: number; bytes: number; format: string }> = [];
       const data = Array.isArray(upstreamResponse.data) ? upstreamResponse.data : [];
       if (data.length === 0) {
         throw new AppError('new-api returned no image data', {
@@ -634,9 +692,15 @@ export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyIn
 
         const decodeStartedAt = performance.now();
         const buffer = decodeBase64Image(item.b64_json);
-        assertPng(buffer);
+        const imageMetadata = readPngMetadata(buffer);
         timings.decode_ms += msSince(decodeStartedAt);
         totalImageBytes += buffer.length;
+        outputImages.push({
+          width: imageMetadata.width,
+          height: imageMetadata.height,
+          bytes: buffer.length,
+          format: imageMetadata.format
+        });
 
         const key = buildImageKey(config.r2.keyPrefix);
         const uploadStartedAt = performance.now();
@@ -669,6 +733,7 @@ export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyIn
       }
       imageCount = outputData.length;
       imageUrls = outputData.map((item) => item.url);
+      responseParams = buildResponseParams(upstreamResponse, outputImages);
 
       const totalMs = msSince(totalStartedAt);
       request.log.info({
@@ -696,6 +761,8 @@ export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyIn
         statusCode: 200,
         success: true,
         ...metadata,
+        requestParams,
+        responseParams,
         totalMs,
         openaiMs: timings.openai_ms,
         decodeMs: timings.decode_ms,
@@ -739,6 +806,8 @@ export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyIn
           statusCode: getAdminStatusCode(error),
           success: false,
           ...metadata,
+          requestParams,
+          responseParams,
           totalMs,
           openaiMs: timings.openai_ms,
           decodeMs: timings.decode_ms,
@@ -759,6 +828,8 @@ export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyIn
         statusCode: getAdminStatusCode(error),
         success: false,
         ...metadata,
+        requestParams,
+        responseParams,
         totalMs,
         openaiMs: timings.openai_ms,
         decodeMs: timings.decode_ms,

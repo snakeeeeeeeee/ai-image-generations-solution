@@ -6,7 +6,7 @@ import { AdminStore } from '../src/admin/store.js';
 import { buildServer } from '../src/server.js';
 import type { AppConfig } from '../src/config.js';
 
-const tinyPngBase64 = 'iVBORw0KGgo=';
+const tinyPngBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=';
 
 type DeepPartial<T> = {
   [K in keyof T]?: T[K] extends object ? DeepPartial<T[K]> : T[K];
@@ -268,6 +268,20 @@ test('successful image requests are recorded without prompt or authorization', a
   assert.equal(records[0]?.operation, 'generation');
   assert.equal(records[0]?.model, 'gpt-image-2-count');
   assert.equal(records[0]?.size, '2560x1440');
+  assert.deepEqual(records[0]?.requestParams, {
+    model: 'gpt-image-2-count',
+    size: '2560x1440',
+    output_format: 'png'
+  });
+  assert.deepEqual(records[0]?.responseParams, {
+    created: 1780000000,
+    format: 'png',
+    width: 1,
+    height: 1,
+    size: '1x1',
+    bytes: 68,
+    count: 1
+  });
   assert.equal(records[0]?.imageCount, 1);
   assert.match(records[0]?.imageUrls[0] ?? '', /^https:\/\/img\.example\.com\/images\//);
   assert.equal(JSON.stringify(records).includes('do not save me'), false);

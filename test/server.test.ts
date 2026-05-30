@@ -5,7 +5,7 @@ import Fastify from 'fastify';
 import { buildServer } from '../src/server.js';
 import type { AppConfig } from '../src/config.js';
 
-const tinyPngBase64 = 'iVBORw0KGgo=';
+const tinyPngBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=';
 
 type DeepPartial<T> = {
   [K in keyof T]?: T[K] extends object ? DeepPartial<T[K]> : T[K];

@@ -19,6 +19,12 @@ export interface ImageDefaults {
   outputFormat: 'png';
 }
 
+export interface PngMetadata {
+  format: 'png';
+  width: number;
+  height: number;
+}
+
 export function applyImageDefaults(body: unknown, defaults: ImageDefaults): ImageRequestBody {
   if (!body || typeof body !== 'object' || Array.isArray(body)) {
     throw new AppError('Request body must be a JSON object', {
@@ -83,6 +89,23 @@ export function assertPng(buffer: Buffer): void {
       code: 'unexpected_image_format'
     });
   }
+}
+
+export function readPngMetadata(buffer: Buffer): PngMetadata {
+  assertPng(buffer);
+  if (buffer.length < 24) {
+    throw new AppError('Decoded image is empty', {
+      statusCode: 502,
+      type: 'server_error',
+      code: 'empty_image'
+    });
+  }
+
+  return {
+    format: 'png',
+    width: buffer.readUInt32BE(16),
+    height: buffer.readUInt32BE(20)
+  };
 }
 
 export function buildImageKey(prefix: string, now = new Date(), id: string = randomUUID()): string {

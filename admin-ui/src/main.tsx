@@ -86,6 +86,8 @@ interface RequestRecord {
   imageCount: number;
   errorCode?: string;
   errorMessage?: string;
+  requestParams?: Record<string, unknown>;
+  responseParams?: Record<string, unknown>;
   imageUrls: string[];
 }
 
@@ -663,6 +665,8 @@ function RequestTable({ page, onPageChange, onPageSizeChange }: {
               <th>解码</th>
               <th>上传</th>
               <th>图片</th>
+              <th>请求关键参数</th>
+              <th>返回关键参数</th>
               <th>错误</th>
               <th>错误详情</th>
               <th>URL</th>
@@ -671,7 +675,7 @@ function RequestTable({ page, onPageChange, onPageSizeChange }: {
           <tbody>
             {page.data.length === 0 ? (
               <tr>
-                <td colSpan={13} className="table-empty">暂无请求记录</td>
+                <td colSpan={15} className="table-empty">暂无请求记录</td>
               </tr>
             ) : page.data.map((request) => (
               <tr key={request.requestId}>
@@ -692,6 +696,12 @@ function RequestTable({ page, onPageChange, onPageSizeChange }: {
                 <td>{formatMs(request.decodeMs)}</td>
                 <td>{formatMs(request.uploadMs)}</td>
                 <td>{request.imageCount} / {formatBytes(request.imageBytes)}</td>
+                <td className="params-cell">
+                  <span title={formatParams(request.requestParams)}>{formatParams(request.requestParams)}</span>
+                </td>
+                <td className="params-cell">
+                  <span title={formatParams(request.responseParams)}>{formatParams(request.responseParams)}</span>
+                </td>
                 <td>{request.errorCode ?? '-'}</td>
                 <td className="error-message-cell">
                   <span title={request.errorMessage ?? ''}>{request.errorMessage ?? '-'}</span>
@@ -805,6 +815,17 @@ function formatBytes(value: number): string {
 
 function formatNumber(value: number): string {
   return new Intl.NumberFormat('zh-CN').format(value);
+}
+
+function formatParams(params: Record<string, unknown> | undefined): string {
+  if (!params || Object.keys(params).length === 0) {
+    return '-';
+  }
+
+  return Object.entries(params)
+    .filter(([, value]) => ['string', 'number', 'boolean'].includes(typeof value))
+    .map(([key, value]) => `${key}: ${String(value)}`)
+    .join(', ');
 }
 
 function formatDate(value: string): string {

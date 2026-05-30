@@ -30,6 +30,8 @@ export interface ImageRequestRecord {
   imageCount: number;
   errorCode?: string;
   errorMessage?: string;
+  requestParams?: Record<string, unknown>;
+  responseParams?: Record<string, unknown>;
   imageUrls: string[];
 }
 

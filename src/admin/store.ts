@@ -19,6 +19,8 @@ interface RequestRow {
   image_count: number;
   error_code: string | null;
   error_message: string | null;
+  request_params_json: string | null;
+  response_params_json: string | null;
   image_urls_json: string;
 }
 
@@ -61,6 +63,8 @@ export class AdminStore {
         image_count INTEGER NOT NULL,
         error_code TEXT,
         error_message TEXT,
+        request_params_json TEXT,
+        response_params_json TEXT,
         image_urls_json TEXT NOT NULL
       );
 
@@ -78,6 +82,8 @@ export class AdminStore {
 
     this.#ensureColumn('image_requests', 'operation', "TEXT NOT NULL DEFAULT 'generation'");
     this.#ensureColumn('image_requests', 'error_message', 'TEXT');
+    this.#ensureColumn('image_requests', 'request_params_json', 'TEXT');
+    this.#ensureColumn('image_requests', 'response_params_json', 'TEXT');
   }
 
   #ensureColumn(table: string, column: string, definition: string): void {
@@ -107,6 +113,8 @@ export class AdminStore {
         image_count,
         error_code,
         error_message,
+        request_params_json,
+        response_params_json,
         image_urls_json
       ) VALUES (
         @request_id,
@@ -124,6 +132,8 @@ export class AdminStore {
         @image_count,
         @error_code,
         @error_message,
+        @request_params_json,
+        @response_params_json,
         @image_urls_json
       )
     `).run({
@@ -142,6 +152,8 @@ export class AdminStore {
       image_count: record.imageCount,
       error_code: record.errorCode ?? null,
       error_message: truncateText(record.errorMessage, 500),
+      request_params_json: stringifyJsonObject(record.requestParams),
+      response_params_json: stringifyJsonObject(record.responseParams),
       image_urls_json: JSON.stringify(record.imageUrls)
     });
   }
@@ -353,8 +365,33 @@ function mapRow(row: RequestRow): ImageRequestRecord {
     imageCount: row.image_count,
     errorCode: row.error_code ?? undefined,
     errorMessage: row.error_message ?? undefined,
+    requestParams: safeJsonObject(row.request_params_json),
+    responseParams: safeJsonObject(row.response_params_json),
     imageUrls: safeJsonArray(row.image_urls_json)
   };
+}
+
+function stringifyJsonObject(value: Record<string, unknown> | undefined): string | null {
+  if (!value || Object.keys(value).length === 0) {
+    return null;
+  }
+
+  return JSON.stringify(value);
+}
+
+function safeJsonObject(value: string | null): Record<string, unknown> | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function truncateText(value: string | undefined, maxLength: number): string | null {

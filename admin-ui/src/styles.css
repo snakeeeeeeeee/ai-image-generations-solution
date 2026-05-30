@@ -554,14 +554,16 @@ th {
   align-items: center;
 }
 
-.error-message-cell {
+.error-message-cell,
+.params-cell {
   width: 320px;
   min-width: 320px;
   max-width: 320px;
   color: var(--text-soft);
 }
 
-.error-message-cell span {
+.error-message-cell span,
+.params-cell span {
   display: block;
   width: 100%;
   overflow: hidden;
