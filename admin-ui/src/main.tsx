@@ -646,6 +646,7 @@ function RequestTable({ page, onPageChange, onPageSizeChange }: {
   onPageSizeChange: (pageSize: number) => void;
 }) {
   const [detailRequest, setDetailRequest] = useState<RequestRecord | null>(null);
+  const [errorDetailRequest, setErrorDetailRequest] = useState<RequestRecord | null>(null);
 
   return (
     <>
@@ -717,7 +718,7 @@ function RequestTable({ page, onPageChange, onPageSizeChange }: {
                     </td>
                     <td>{request.errorCode ?? '-'}</td>
                     <td className="error-message-cell">
-                      <span title={request.errorMessage ?? ''}>{request.errorMessage ?? '-'}</span>
+                      <ErrorCell request={request} onView={() => setErrorDetailRequest(request)} />
                     </td>
                     <td>
                       {request.imageUrls[0] ? (
@@ -735,11 +736,29 @@ function RequestTable({ page, onPageChange, onPageSizeChange }: {
         <Pagination page={page} onPageChange={onPageChange} onPageSizeChange={onPageSizeChange} />
       </section>
       {detailRequest ? <ParamDetailsModal request={detailRequest} onClose={() => setDetailRequest(null)} /> : null}
+      {errorDetailRequest ? <ErrorDetailsModal request={errorDetailRequest} onClose={() => setErrorDetailRequest(null)} /> : null}
     </>
   );
 }
 
 function ParamCell({ summary, onView }: { summary: string; onView: () => void }) {
+  return (
+    <div className="params-summary">
+      <span>{summary}</span>
+      <button className="mini-action-button" type="button" onClick={onView}>
+        <Eye size={13} />
+        查看
+      </button>
+    </div>
+  );
+}
+
+function ErrorCell({ request, onView }: { request: RequestRecord; onView: () => void }) {
+  const summary = formatErrorSummary(request);
+  if (summary === '-') {
+    return <span>-</span>;
+  }
+
   return (
     <div className="params-summary">
       <span>{summary}</span>
@@ -793,6 +812,40 @@ function ParamDetailsModal({ request, onClose }: { request: RequestRecord; onClo
           <JsonPanel title="请求关键参数" value={request.requestParams} />
           <JsonPanel title="返回关键参数" value={request.responseParams} />
         </div>
+      </section>
+    </div>
+  );
+}
+
+function ErrorDetailsModal({ request, onClose }: { request: RequestRecord; onClose: () => void }) {
+  useEffect(() => {
+    function closeOnEscape(event: KeyboardEvent) {
+      if (event.key === 'Escape') {
+        onClose();
+      }
+    }
+    window.addEventListener('keydown', closeOnEscape);
+    return () => window.removeEventListener('keydown', closeOnEscape);
+  }, [onClose]);
+
+  return (
+    <div className="modal-backdrop" role="presentation" onMouseDown={(event) => {
+      if (event.currentTarget === event.target) {
+        onClose();
+      }
+    }}>
+      <section className="params-modal params-modal-narrow" role="dialog" aria-modal="true" aria-labelledby="error-modal-title">
+        <div className="modal-header">
+          <div>
+            <p className="eyebrow">错误详情</p>
+            <h2 id="error-modal-title">{request.errorCode ?? '未知错误'}</h2>
+            <span>{formatDate(request.createdAt)} · {request.requestId}</span>
+          </div>
+          <button className="icon-button" type="button" onClick={onClose} title="关闭">
+            <X size={16} />
+          </button>
+        </div>
+        <JsonPanel title="错误信息" value={buildErrorDetails(request)} />
       </section>
     </div>
   );
@@ -944,6 +997,26 @@ function formatResponseParamSummary(params: Record<string, unknown> | undefined)
   const count = getScalarParam(params, 'count');
   const parts = [format, size, bytes, count ? `count:${count}` : undefined].filter((part): part is string => Boolean(part));
   return parts.length > 0 ? parts.join(' | ') : '-';
+}
+
+function formatErrorSummary(request: RequestRecord): string {
+  const message = request.errorMessage?.trim();
+  if (!message) {
+    return '-';
+  }
+
+  return message.length > 64 ? `${message.slice(0, 63)}...` : message;
+}
+
+function buildErrorDetails(request: RequestRecord): Record<string, unknown> {
+  return {
+    statusCode: request.statusCode,
+    errorCode: request.errorCode ?? null,
+    message: request.errorMessage ?? null,
+    requestId: request.requestId,
+    operation: operationLabel(request.operation),
+    createdAt: request.createdAt
+  };
 }
 
 function getParamMismatchReasons(request: RequestRecord): string[] {
