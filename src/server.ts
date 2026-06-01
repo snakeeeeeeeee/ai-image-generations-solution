@@ -49,6 +49,11 @@ interface UpstreamFetchResult {
   stopTimeout: () => void;
 }
 
+interface CorsConfig {
+  allowedOrigins: string[];
+  maxAgeSeconds: number;
+}
+
 interface UpstreamRequestPayload {
   body: string | FormData;
   headers: Record<string, string>;
@@ -249,6 +254,32 @@ function r2ErrorDetails(error: unknown): Record<string, unknown> {
 
 function isAbortError(error: unknown): boolean {
   return error instanceof Error && error.name === 'AbortError';
+}
+
+function isImageApiPath(pathname: string): boolean {
+  return pathname === '/v1/images/generations' || pathname === '/v1/images/edits';
+}
+
+function getAllowedCorsOrigin(config: CorsConfig, origin: string | undefined): string | undefined {
+  if (!origin) {
+    return undefined;
+  }
+
+  if (config.allowedOrigins.includes('*')) {
+    return '*';
+  }
+
+  return config.allowedOrigins.includes(origin) ? origin : undefined;
+}
+
+function applyCorsHeaders(reply: FastifyReply, config: CorsConfig, origin: string | undefined): void {
+  const allowedOrigin = getAllowedCorsOrigin(config, origin);
+  if (!allowedOrigin) {
+    return;
+  }
+
+  reply.header('Access-Control-Allow-Origin', allowedOrigin);
+  reply.header('Vary', 'Origin');
 }
 
 function upstreamTimeoutError(error: unknown): AppError {
@@ -581,6 +612,36 @@ export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyIn
     clearInterval(cleanupInterval);
     adminStore.close();
   });
+
+  app.addHook('onRequest', async (request, reply) => {
+    const pathname = new URL(request.url, 'http://localhost').pathname;
+    if (!isImageApiPath(pathname)) {
+      return;
+    }
+
+    applyCorsHeaders(reply, config.cors, request.headers.origin);
+  });
+
+  async function handleCorsPreflight(request: FastifyRequest, reply: FastifyReply): Promise<FastifyReply> {
+    const origin = request.headers.origin;
+    const allowedOrigin = getAllowedCorsOrigin(config.cors, origin);
+    if (!allowedOrigin) {
+      return reply.status(403).send();
+    }
+
+    reply.header('Access-Control-Allow-Origin', allowedOrigin);
+    reply.header('Vary', 'Origin');
+    reply.header('Access-Control-Allow-Methods', 'POST, OPTIONS');
+    reply.header(
+      'Access-Control-Allow-Headers',
+      request.headers['access-control-request-headers'] ?? 'Authorization, Content-Type, X-Request-ID'
+    );
+    reply.header('Access-Control-Max-Age', String(config.cors.maxAgeSeconds));
+    return reply.status(204).send();
+  }
+
+  app.options('/v1/images/generations', handleCorsPreflight);
+  app.options('/v1/images/edits', handleCorsPreflight);
 
   registerAdminRoutes(app, {
     config: config.admin,

@@ -29,6 +29,10 @@ export interface AppConfig {
     retryBaseDelayMs: number;
     retryMaxDelayMs: number;
   };
+  cors: {
+    allowedOrigins: string[];
+    maxAgeSeconds: number;
+  };
   r2: R2Config;
   admin: AdminConfig;
 }
@@ -90,6 +94,13 @@ function normalizePngFormat(value: string): 'png' {
   return 'png';
 }
 
+function parseCsvEnv(name: string, fallback: string): string[] {
+  return optionalEnv(name, fallback)
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
 export function loadConfig(): AppConfig {
   return {
     port: parsePositiveInt('PORT', 8787),
@@ -115,6 +126,10 @@ export function loadConfig(): AppConfig {
       maxRetries: parsePositiveInt('R2_UPLOAD_MAX_RETRIES', 3),
       retryBaseDelayMs: parsePositiveInt('R2_UPLOAD_RETRY_BASE_DELAY_MS', 300),
       retryMaxDelayMs: parsePositiveInt('R2_UPLOAD_RETRY_MAX_DELAY_MS', 3000)
+    },
+    cors: {
+      allowedOrigins: parseCsvEnv('CORS_ALLOWED_ORIGINS', '*'),
+      maxAgeSeconds: parsePositiveInt('CORS_MAX_AGE_SECONDS', 86400)
     },
     r2: {
       endpoint: normalizeBaseUrl(requireEnv('R2_ENDPOINT')),

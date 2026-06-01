@@ -37,6 +37,10 @@ function buildTestConfig(baseUrl: string, overrides: DeepPartial<AppConfig> = {}
       retryBaseDelayMs: 1,
       retryMaxDelayMs: 5
     },
+    cors: {
+      allowedOrigins: ['*'],
+      maxAgeSeconds: 86400
+    },
     r2: {
       endpoint: 'http://127.0.0.1:1',
       accessKeyId: 'test',
@@ -75,6 +79,10 @@ function buildTestConfig(baseUrl: string, overrides: DeepPartial<AppConfig> = {}
     upload: {
       ...base.upload,
       ...overrides.upload
+    },
+    cors: {
+      allowedOrigins: overrides.cors?.allowedOrigins?.filter((item): item is string => typeof item === 'string') ?? base.cors.allowedOrigins,
+      maxAgeSeconds: overrides.cors?.maxAgeSeconds ?? base.cors.maxAgeSeconds
     },
     r2: {
       ...base.r2,
@@ -139,6 +147,113 @@ test('POST /v1/images/generations uploads image and returns URL', async () => {
   assert.equal(body.created, 1780000000);
   assert.equal(body.created_at_beijing, '2026-05-29 04:26:40');
   assert.match(body.data[0]?.url ?? '', /^https:\/\/img\.example\.com\/images\/\d{4}\/\d{2}\/\d{2}\/.+\.png$/);
+
+  await app.close();
+  await upstream.close();
+});
+
+test('OPTIONS /v1/images/generations responds to browser CORS preflight', async () => {
+  const app = buildServer(buildTestConfig('http://127.0.0.1:1'));
+
+  const response = await app.inject({
+    method: 'OPTIONS',
+    url: '/v1/images/generations',
+    headers: {
+      origin: 'https://client.example.com',
+      'access-control-request-method': 'POST',
+      'access-control-request-headers': 'authorization,content-type'
+    }
+  });
+
+  assert.equal(response.statusCode, 204);
+  assert.equal(response.headers['access-control-allow-origin'], '*');
+  assert.equal(response.headers['access-control-allow-methods'], 'POST, OPTIONS');
+  assert.equal(response.headers['access-control-allow-headers'], 'authorization,content-type');
+
+  await app.close();
+});
+
+test('image API CORS can restrict allowed origins', async () => {
+  const app = buildServer(buildTestConfig('http://127.0.0.1:1', {
+    cors: {
+      allowedOrigins: ['https://allowed.example.com'],
+      maxAgeSeconds: 600
+    }
+  }));
+
+  const allowed = await app.inject({
+    method: 'OPTIONS',
+    url: '/v1/images/edits',
+    headers: {
+      origin: 'https://allowed.example.com',
+      'access-control-request-method': 'POST',
+      'access-control-request-headers': 'authorization,content-type'
+    }
+  });
+  assert.equal(allowed.statusCode, 204);
+  assert.equal(allowed.headers['access-control-allow-origin'], 'https://allowed.example.com');
+  assert.equal(allowed.headers['access-control-max-age'], '600');
+
+  const blocked = await app.inject({
+    method: 'OPTIONS',
+    url: '/v1/images/edits',
+    headers: {
+      origin: 'https://blocked.example.com',
+      'access-control-request-method': 'POST',
+      'access-control-request-headers': 'authorization,content-type'
+    }
+  });
+  assert.equal(blocked.statusCode, 403);
+  assert.equal(blocked.headers['access-control-allow-origin'], undefined);
+
+  await app.close();
+});
+
+test('image API POST includes CORS header but admin API does not', async () => {
+  const upstream = Fastify();
+
+  upstream.post('/v1/images/generations', async () => ({
+    created: 1780000000,
+    data: [
+      {
+        b64_json: tinyPngBase64
+      }
+    ]
+  }));
+
+  await upstream.listen({ port: 0, host: '127.0.0.1' });
+  const upstreamAddress = upstream.server.address();
+  assert.ok(upstreamAddress && typeof upstreamAddress === 'object');
+  const port = (upstreamAddress as AddressInfo).port;
+
+  const app = buildServer(buildTestConfig(`http://127.0.0.1:${port}`), {
+    uploadPngToR2: async ({ key }) => `https://img.example.com/${key}`
+  });
+
+  const imageResponse = await app.inject({
+    method: 'POST',
+    url: '/v1/images/generations',
+    headers: {
+      origin: 'https://client.example.com',
+      authorization: 'Bearer test-key',
+      'content-type': 'application/json'
+    },
+    payload: {
+      model: 'gpt-image-2-count',
+      prompt: 'test'
+    }
+  });
+  assert.equal(imageResponse.statusCode, 200);
+  assert.equal(imageResponse.headers['access-control-allow-origin'], '*');
+
+  const adminResponse = await app.inject({
+    method: 'GET',
+    url: '/image-wrapper/admin/api/summary',
+    headers: {
+      origin: 'https://client.example.com'
+    }
+  });
+  assert.equal(adminResponse.headers['access-control-allow-origin'], undefined);
 
   await app.close();
   await upstream.close();

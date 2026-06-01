@@ -38,6 +38,10 @@ function buildTestConfig(baseUrl: string, overrides: DeepPartial<AppConfig> = {}
       retryBaseDelayMs: 1,
       retryMaxDelayMs: 5
     },
+    cors: {
+      allowedOrigins: ['*'],
+      maxAgeSeconds: 86400
+    },
     r2: {
       endpoint: 'http://127.0.0.1:1',
       accessKeyId: 'test',
@@ -76,6 +80,10 @@ function buildTestConfig(baseUrl: string, overrides: DeepPartial<AppConfig> = {}
     upload: {
       ...base.upload,
       ...overrides.upload
+    },
+    cors: {
+      allowedOrigins: overrides.cors?.allowedOrigins?.filter((item): item is string => typeof item === 'string') ?? base.cors.allowedOrigins,
+      maxAgeSeconds: overrides.cors?.maxAgeSeconds ?? base.cors.maxAgeSeconds
     },
     r2: {
       ...base.r2,
