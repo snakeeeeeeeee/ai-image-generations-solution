@@ -259,6 +259,54 @@ test('image API POST includes CORS header but admin API does not', async () => {
   await upstream.close();
 });
 
+test('POST /v1/images/generations honors configured upstream header timeout', async () => {
+  const upstream = Fastify();
+
+  upstream.post('/v1/images/generations', async () => {
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    return {
+      created: 1780000000,
+      data: [
+        {
+          b64_json: tinyPngBase64
+        }
+      ]
+    };
+  });
+
+  await upstream.listen({ port: 0, host: '127.0.0.1' });
+  const upstreamAddress = upstream.server.address();
+  assert.ok(upstreamAddress && typeof upstreamAddress === 'object');
+  const port = (upstreamAddress as AddressInfo).port;
+
+  const app = buildServer(buildTestConfig(`http://127.0.0.1:${port}`, {
+    upstream: {
+      timeoutMs: 50
+    }
+  }), {
+    uploadPngToR2: async ({ key }) => `https://img.example.com/${key}`
+  });
+
+  const response = await app.inject({
+    method: 'POST',
+    url: '/v1/images/generations',
+    headers: {
+      authorization: 'Bearer test-key',
+      'content-type': 'application/json'
+    },
+    payload: {
+      model: 'gpt-image-2-count',
+      prompt: 'test'
+    }
+  });
+
+  assert.equal(response.statusCode, 504);
+  assert.equal(response.json().error.code, 'upstream_timeout');
+
+  await app.close();
+  await upstream.close();
+});
+
 test('POST /v1/images/edits forwards JSON image edit request and returns URL', async () => {
   const upstream = Fastify();
   let upstreamRequestBody: Record<string, unknown> | undefined;

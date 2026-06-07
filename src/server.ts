@@ -1,6 +1,7 @@
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 import multipart from '@fastify/multipart';
 import { performance } from 'node:perf_hooks';
+import { Agent, fetch as undiciFetch } from 'undici';
 import { registerAdminRoutes } from './admin/routes.js';
 import { AdminStore } from './admin/store.js';
 import type { AdminRuntimeStats, ImageRequestRecord } from './admin/types.js';
@@ -48,6 +49,8 @@ interface UpstreamFetchResult {
   response: Response;
   stopTimeout: () => void;
 }
+
+type UpstreamDispatcher = Agent;
 
 interface CorsConfig {
   allowedOrigins: string[];
@@ -401,22 +404,25 @@ async function fetchUpstream({
   config,
   request,
   operation,
-  payload
+  payload,
+  dispatcher
 }: {
   config: AppConfig;
   request: FastifyRequest;
   operation: ImageOperation;
   payload: UpstreamRequestPayload;
+  dispatcher: UpstreamDispatcher;
 }): Promise<UpstreamFetchResult> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), config.upstream.timeoutMs);
 
   try {
-    const response = await fetch(upstreamUrl(config, operation), {
+    const response = await undiciFetch(upstreamUrl(config, operation), {
       method: 'POST',
       headers: copyForwardHeaders(request, payload.headers),
       body: payload.body,
-      signal: controller.signal
+      signal: controller.signal,
+      dispatcher
     });
 
     return {
@@ -580,6 +586,10 @@ async function uploadWithRetry({
 
 export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyInstance {
   const r2Client = createR2Client(config.r2);
+  const upstreamDispatcher = new Agent({
+    headersTimeout: config.upstream.timeoutMs,
+    bodyTimeout: config.upstream.timeoutMs
+  });
   const upload = deps.uploadPngToR2 ?? uploadPngToR2;
   const adminStore = deps.adminStore ?? new AdminStore(config.admin.dbPath);
   const generationLimiter = new ActiveRequestLimiter(config.limits.maxConcurrentGenerations);
@@ -610,6 +620,7 @@ export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyIn
 
   app.addHook('onClose', async () => {
     clearInterval(cleanupInterval);
+    await upstreamDispatcher.close();
     adminStore.close();
   });
 
@@ -720,7 +731,8 @@ export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyIn
         config,
         request,
         operation,
-        payload: upstreamPayload
+        payload: upstreamPayload,
+        dispatcher: upstreamDispatcher
       });
       stopUpstreamTimeout = upstreamFetch.stopTimeout;
 
