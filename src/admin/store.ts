@@ -334,6 +334,51 @@ export class AdminStore {
   }
 
   getErrors(): Array<{ code: string; count: number; lastSeenAt: string }> {
+    return this.getErrorsPage(1, 1000, 24).data;
+  }
+
+  getErrorsPage(page: number, pageSize: number, windowHours = 24): {
+    data: Array<{ code: string; count: number; lastSeenAt: string }>;
+    page: number;
+    pageSize: number;
+    total: number;
+    totalPages: number;
+    windowHours: number;
+  } {
+    const cutoff = new Date(Date.now() - windowHours * 60 * 60 * 1000).toISOString();
+    const totalRow = this.#db.prepare(`
+      SELECT COUNT(*) as total
+      FROM (
+        SELECT error_code
+        FROM image_requests
+        WHERE error_code IS NOT NULL AND created_at >= ?
+        GROUP BY error_code
+      )
+    `).get(cutoff) as { total: number };
+    const total = totalRow.total;
+    const totalPages = Math.max(1, Math.ceil(total / pageSize));
+    const safePage = Math.min(Math.max(1, page), totalPages);
+    const offset = (safePage - 1) * pageSize;
+    const data = this.#db.prepare(`
+      SELECT error_code as code, COUNT(*) as count, MAX(created_at) as lastSeenAt
+      FROM image_requests
+      WHERE error_code IS NOT NULL AND created_at >= ?
+      GROUP BY error_code
+      ORDER BY count DESC, lastSeenAt DESC
+      LIMIT ? OFFSET ?
+    `).all(cutoff, pageSize, offset) as Array<{ code: string; count: number; lastSeenAt: string }>;
+
+    return {
+      data,
+      page: safePage,
+      pageSize,
+      total,
+      totalPages,
+      windowHours
+    };
+  }
+
+  getAllTimeErrors(): Array<{ code: string; count: number; lastSeenAt: string }> {
     return this.#db.prepare(`
       SELECT error_code as code, COUNT(*) as count, MAX(created_at) as lastSeenAt
       FROM image_requests

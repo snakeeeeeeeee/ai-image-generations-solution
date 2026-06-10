@@ -467,6 +467,16 @@ h2 {
   font-size: 12px;
 }
 
+.error-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 12px;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
 .empty-state,
 .empty-panel {
   min-height: 76px;

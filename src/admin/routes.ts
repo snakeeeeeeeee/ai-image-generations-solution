@@ -112,9 +112,11 @@ export function registerAdminRoutes(app: FastifyInstance, options: AdminRoutesOp
 
   app.get(route('/api/errors'), {
     preHandler: async (request, reply) => requireAdmin(options.config, request, reply)
-  }, async () => ({
-    data: options.store.getErrors()
-  }));
+  }, async (request: FastifyRequest<{ Querystring: PageQuery }>) => {
+    const page = parseBoundedInt(request.query.page, 1, 1, Number.MAX_SAFE_INTEGER);
+    const pageSize = parseBoundedInt(request.query.page_size, 5, 1, 100);
+    return options.store.getErrorsPage(page, pageSize, 24);
+  });
 
   app.get(route('/login'), async (_request, reply) => sendAdminShell(reply, adminDist));
   app.get(basePath, {

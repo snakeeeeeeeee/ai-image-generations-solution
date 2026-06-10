@@ -102,9 +102,18 @@ interface ErrorRecord {
 interface DashboardData {
   runtime: RuntimeStats;
   summary: Summary;
-  errors: ErrorRecord[];
+  errors: PaginatedErrors;
   requests: PaginatedRecords;
   images: PaginatedRecords;
+}
+
+interface PaginatedErrors {
+  data: ErrorRecord[];
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
+  windowHours: number;
 }
 
 interface PaginatedRecords {
@@ -225,6 +234,8 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
   const [requestPageSize, setRequestPageSize] = useState(20);
   const [imagePage, setImagePage] = useState(1);
   const [imagePageSize, setImagePageSize] = useState(10);
+  const [errorPage, setErrorPage] = useState(1);
+  const errorPageSize = 5;
   const [error, setError] = useState('');
   const [drainUpdating, setDrainUpdating] = useState(false);
 
@@ -234,6 +245,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
     requestPageSize?: number;
     imagePage?: number;
     imagePageSize?: number;
+    errorPage?: number;
   } = {}) {
     if (options.silent) {
       setRefreshing(true);
@@ -246,20 +258,22 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
       const nextRequestPageSize = options.requestPageSize ?? requestPageSize;
       const nextImagePage = options.imagePage ?? imagePage;
       const nextImagePageSize = options.imagePageSize ?? imagePageSize;
+      const nextErrorPage = options.errorPage ?? errorPage;
       const [summary, requests, images, errors] = await Promise.all([
         fetchJson<{ runtime: RuntimeStats; summary: Summary }>(adminPath('/api/summary')),
         fetchJson<PaginatedRecords>(adminPath(`/api/requests?page=${nextRequestPage}&page_size=${nextRequestPageSize}`)),
         fetchJson<PaginatedRecords>(adminPath(`/api/images?page=${nextImagePage}&page_size=${nextImagePageSize}`)),
-        fetchJson<{ data: ErrorRecord[] }>(adminPath('/api/errors'))
+        fetchJson<PaginatedErrors>(adminPath(`/api/errors?page=${nextErrorPage}&page_size=${errorPageSize}`))
       ]);
       setRequestPage(requests.page);
       setRequestPageSize(requests.pageSize);
       setImagePage(images.page);
       setImagePageSize(images.pageSize);
+      setErrorPage(errors.page);
       setData({
         runtime: summary.runtime,
         summary: summary.summary,
-        errors: errors.data,
+        errors,
         requests,
         images
       });
@@ -281,7 +295,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
   useEffect(() => {
     const timer = window.setInterval(() => void load({ silent: true }), refreshIntervalMs);
     return () => window.clearInterval(timer);
-  }, [refreshIntervalMs, requestPage, requestPageSize, imagePage, imagePageSize]);
+  }, [refreshIntervalMs, requestPage, requestPageSize, imagePage, imagePageSize, errorPage]);
 
   async function logout() {
     await fetch(adminPath('/logout'), { method: 'POST' });
@@ -333,11 +347,16 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
     void load({ silent: true, imagePage: 1, imagePageSize: pageSize });
   }
 
+  function changeErrorPage(page: number) {
+    setErrorPage(page);
+    void load({ silent: true, errorPage: page });
+  }
+
   const memoryPercent = data ? percent(data.runtime.memory.rssBytes, data.runtime.memory.maxRssBytes) : 0;
   const processingPercent = data
     ? percent(data.runtime.activeImageProcessing, data.runtime.maxConcurrentImageProcessing)
     : 0;
-  const r2UploadError = data?.errors.find((item) => item.code === 'r2_upload_failed');
+  const r2UploadError = data?.errors.data.find((item) => item.code === 'r2_upload_failed');
 
   return (
     <main className="dashboard-shell">
@@ -485,7 +504,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
             </div>
           </section>
 
-          <ErrorPanel errors={data.errors} />
+          <ErrorPanel errors={data.errors} onPageChange={changeErrorPage} />
           <ImageTable page={data.images} onPageChange={changeImagePage} onPageSizeChange={changeImagePageSize} />
           <RequestTable page={data.requests} onPageChange={changeRequestPage} onPageSizeChange={changeRequestPageSize} />
         </>
@@ -546,19 +565,25 @@ function ChartTooltip({ active, payload, label }: any) {
   );
 }
 
-function ErrorPanel({ errors }: { errors: ErrorRecord[] }) {
+function ErrorPanel({ errors, onPageChange }: {
+  errors: PaginatedErrors;
+  onPageChange: (page: number) => void;
+}) {
+  const hasPrevious = errors.page > 1;
+  const hasNext = errors.page < errors.totalPages;
+
   return (
     <section className="panel">
       <div className="panel-heading">
         <div>
           <h2>错误分布</h2>
-          <p>按错误码聚合。</p>
+          <p>最近 1 天按错误码聚合，每页 5 条。</p>
         </div>
       </div>
       <div className="error-list">
-        {errors.length === 0 ? (
+        {errors.data.length === 0 ? (
           <div className="empty-state"><CheckCircle2 size={18} /> 暂无错误记录</div>
-        ) : errors.map((error) => (
+        ) : errors.data.map((error) => (
           <div className="error-row" key={error.code}>
             <div>
               <strong>{error.code}</strong>
@@ -568,6 +593,21 @@ function ErrorPanel({ errors }: { errors: ErrorRecord[] }) {
           </div>
         ))}
       </div>
+      {errors.total > errors.pageSize ? (
+        <div className="error-pagination">
+          <span>
+            共 {formatNumber(errors.total)} 类，第 {formatNumber(errors.page)} / {formatNumber(errors.totalPages)} 页
+          </span>
+          <div className="pagination-actions">
+            <button className="ghost-button" disabled={!hasPrevious} onClick={() => onPageChange(errors.page - 1)}>
+              上一页
+            </button>
+            <button className="ghost-button" disabled={!hasNext} onClick={() => onPageChange(errors.page + 1)}>
+              下一页
+            </button>
+          </div>
+        </div>
+      ) : null}
     </section>
   );
 }

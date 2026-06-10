@@ -554,6 +554,59 @@ test('memory guard failures are recorded with error code', async () => {
   await upstream.close();
 });
 
+test('admin error distribution is limited to the last day and paginated', () => {
+  const store = new AdminStore(':memory:');
+  const now = Date.now();
+  const recentCodes = ['a', 'b', 'c', 'd', 'e', 'f'];
+
+  for (const [index, code] of recentCodes.entries()) {
+    store.recordRequest({
+      requestId: `recent-${code}`,
+      createdAt: new Date(now - index * 60 * 1000).toISOString(),
+      operation: 'generation',
+      statusCode: 500,
+      success: false,
+      totalMs: 1,
+      openaiMs: 1,
+      decodeMs: 0,
+      uploadMs: 0,
+      imageBytes: 0,
+      imageCount: 0,
+      errorCode: code,
+      imageUrls: []
+    });
+  }
+  store.recordRequest({
+    requestId: 'old-error',
+    createdAt: new Date(now - 2 * 24 * 60 * 60 * 1000).toISOString(),
+    operation: 'generation',
+    statusCode: 500,
+    success: false,
+    totalMs: 1,
+    openaiMs: 1,
+    decodeMs: 0,
+    uploadMs: 0,
+    imageBytes: 0,
+    imageCount: 0,
+    errorCode: 'old_error',
+    imageUrls: []
+  });
+
+  const firstPage = store.getErrorsPage(1, 5, 24);
+  assert.equal(firstPage.total, 6);
+  assert.equal(firstPage.totalPages, 2);
+  assert.equal(firstPage.pageSize, 5);
+  assert.equal(firstPage.windowHours, 24);
+  assert.equal(firstPage.data.length, 5);
+  assert.equal(firstPage.data.some((item) => item.code === 'old_error'), false);
+
+  const secondPage = store.getErrorsPage(2, 5, 24);
+  assert.equal(secondPage.page, 2);
+  assert.equal(secondPage.data.length, 1);
+
+  store.close();
+});
+
 test('admin store cleanup removes records older than retention window', () => {
   const store = new AdminStore(':memory:');
   store.recordRequest({
