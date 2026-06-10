@@ -7,12 +7,15 @@ import { AdminStore } from './admin/store.js';
 import type { AdminRuntimeStats, ImageRequestRecord } from './admin/types.js';
 import type { AppConfig } from './config.js';
 import { AppError, openAIError, sendAppError } from './errors.js';
-import { applyImageDefaults, buildImageKey, decodeBase64Image, readPngMetadata, type ImageRequestBody } from './image.js';
+import { buildImageKey, decodeBase64Image, normalizeImageRequestBody, readImageMetadata, type ImageMetadata, type ImageRequestBody } from './image.js';
+import { pickImageStrategy, type ImageModelStrategy, type ImageSource, type ImageSourceType } from './image-strategy.js';
 import { ActiveRequestLimiter } from './limiter.js';
-import { createR2Client, uploadPngToR2 } from './r2.js';
+import { createR2Client, uploadImageToR2 } from './r2.js';
 
 interface UpstreamImageItem {
   b64_json?: string;
+  url?: string;
+  mime_type?: string;
   [key: string]: unknown;
 }
 
@@ -34,7 +37,7 @@ interface Timings {
   upload_ms: number;
 }
 
-type UploadPngToR2 = typeof uploadPngToR2;
+type UploadImageToR2 = typeof uploadImageToR2;
 type ImageOperation = 'generation' | 'edit';
 
 interface MemorySnapshot {
@@ -60,6 +63,7 @@ interface CorsConfig {
 interface UpstreamRequestPayload {
   body: string | FormData;
   headers: Record<string, string>;
+  strategy: ImageModelStrategy;
   metadata: {
     model?: string;
     size?: string;
@@ -68,7 +72,8 @@ interface UpstreamRequestPayload {
 }
 
 interface ServerDeps {
-  uploadPngToR2?: UploadPngToR2;
+  uploadImageToR2?: UploadImageToR2;
+  uploadPngToR2?: UploadImageToR2;
   adminStore?: AdminStore;
 }
 
@@ -149,7 +154,8 @@ function addResponseParam(params: Record<string, unknown>, key: string, value: u
 
 function buildResponseParams(
   upstreamResponse: UpstreamImageResponse,
-  outputImages: Array<{ width: number; height: number; bytes: number; format: string }>
+  outputImages: Array<ImageMetadata & { sourceType: ImageSourceType }>,
+  strategy: ImageModelStrategy
 ): Record<string, unknown> {
   const params: Record<string, unknown> = {};
   addResponseParam(params, 'created', upstreamResponse.created);
@@ -164,6 +170,11 @@ function buildResponseParams(
   }
   if (outputImages.length > 0) {
     params.count = outputImages.length;
+  }
+  if (strategy.name !== 'gpt-image') {
+    params.strategy = strategy.name;
+    params.formats = [...new Set(outputImages.map((item) => item.format))];
+    params.sourceTypes = [...new Set(outputImages.map((item) => item.sourceType))];
   }
 
   return params;
@@ -438,16 +449,185 @@ async function fetchUpstream({
   }
 }
 
+function imageDownloadTimeoutError(error: unknown): AppError {
+  return new AppError('Upstream image URL download timed out', {
+    statusCode: 504,
+    type: 'server_error',
+    code: 'image_url_download_timeout',
+    cause: error
+  });
+}
+
+function parseImageDownloadUrl(value: string): URL {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch (error) {
+    throw new AppError('Upstream image URL is invalid', {
+      statusCode: 502,
+      type: 'server_error',
+      code: 'invalid_image_url',
+      cause: error
+    });
+  }
+
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new AppError('Upstream image URL protocol is unsupported', {
+      statusCode: 502,
+      type: 'server_error',
+      code: 'unsupported_image_url_protocol'
+    });
+  }
+
+  return url;
+}
+
+function getResponseContentLength(response: Response): number | undefined {
+  const value = response.headers.get('content-length');
+  if (!value) {
+    return undefined;
+  }
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
+}
+
+async function readResponseBufferWithLimit(response: Response, limitBytes: number): Promise<Buffer> {
+  const contentLength = getResponseContentLength(response);
+  if (contentLength !== undefined && contentLength > limitBytes) {
+    throw new AppError('Downloaded image exceeds size limit', {
+      statusCode: 502,
+      type: 'server_error',
+      code: 'image_download_too_large',
+      cause: {
+        content_length: contentLength,
+        limit_bytes: limitBytes
+      }
+    });
+  }
+
+  if (!response.body) {
+    throw new AppError('Downloaded image body is empty', {
+      statusCode: 502,
+      type: 'server_error',
+      code: 'empty_image'
+    });
+  }
+
+  const reader = response.body.getReader();
+  const chunks: Buffer[] = [];
+  let totalBytes = 0;
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      totalBytes += value.byteLength;
+      if (totalBytes > limitBytes) {
+        await reader.cancel();
+        throw new AppError('Downloaded image exceeds size limit', {
+          statusCode: 502,
+          type: 'server_error',
+          code: 'image_download_too_large',
+          cause: {
+            bytes: totalBytes,
+            limit_bytes: limitBytes
+          }
+        });
+      }
+      chunks.push(Buffer.from(value));
+    }
+  } catch (error) {
+    if (isAbortError(error)) {
+      throw imageDownloadTimeoutError(error);
+    }
+    throw error;
+  }
+
+  const buffer = Buffer.concat(chunks, totalBytes);
+  if (buffer.length === 0) {
+    throw new AppError('Downloaded image body is empty', {
+      statusCode: 502,
+      type: 'server_error',
+      code: 'empty_image'
+    });
+  }
+
+  return buffer;
+}
+
+async function downloadImageUrl({
+  source,
+  config,
+  dispatcher
+}: {
+  source: ImageSource;
+  config: AppConfig;
+  dispatcher: UpstreamDispatcher;
+}): Promise<Buffer> {
+  const url = parseImageDownloadUrl(source.value);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), config.upstream.timeoutMs);
+
+  try {
+    const response = await undiciFetch(url, {
+      method: 'GET',
+      signal: controller.signal,
+      dispatcher
+    });
+    if (!response.ok) {
+      throw new AppError('Upstream image URL download failed', {
+        statusCode: 502,
+        type: 'server_error',
+        code: 'image_url_download_failed',
+        cause: {
+          status_code: response.status,
+          status_text: response.statusText
+        }
+      });
+    }
+
+    return await readResponseBufferWithLimit(response, config.bodyLimitBytes);
+  } catch (error) {
+    if (isAbortError(error)) {
+      throw imageDownloadTimeoutError(error);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function loadImageSource({
+  source,
+  config,
+  dispatcher
+}: {
+  source: ImageSource;
+  config: AppConfig;
+  dispatcher: UpstreamDispatcher;
+}): Promise<Buffer> {
+  if (source.type === 'base64') {
+    return decodeBase64Image(source.value);
+  }
+
+  return downloadImageUrl({ source, config, dispatcher });
+}
+
 async function buildJsonUpstreamPayload(
   request: FastifyRequest,
   config: AppConfig
 ): Promise<UpstreamRequestPayload> {
-  const body = applyImageDefaults(request.body, config.defaults);
+  const rawBody = normalizeImageRequestBody(request.body);
+  const strategy = pickImageStrategy(rawBody);
+  const body = strategy.applyRequestDefaults(rawBody, config.defaults);
   return {
     body: JSON.stringify(body),
     headers: {
       'content-type': 'application/json'
     },
+    strategy,
     metadata: getRequestMetadata(body),
     requestParams: buildRequestParamsFromBody(body)
   };
@@ -493,15 +673,23 @@ async function buildMultipartUpstreamPayload(
   }
 
   if (!fields.has('size')) {
-    form.append('size', config.defaults.size);
-    fields.set('size', config.defaults.size);
+    const strategy = pickImageStrategy({ model: fields.get('model') });
+    if (strategy.name !== 'xai-grok-imagine') {
+      form.append('size', config.defaults.size);
+      fields.set('size', config.defaults.size);
+    }
   }
-  form.set('output_format', config.defaults.outputFormat);
-  fields.set('output_format', config.defaults.outputFormat);
+
+  const strategy = pickImageStrategy({ model: fields.get('model') });
+  if (strategy.name !== 'xai-grok-imagine') {
+    form.set('output_format', config.defaults.outputFormat);
+    fields.set('output_format', config.defaults.outputFormat);
+  }
 
   return {
     body: form,
     headers: {},
+    strategy,
     metadata: getFieldMetadata(fields),
     requestParams: buildRequestParamsFromFields(fields)
   };
@@ -542,14 +730,16 @@ async function uploadWithRetry({
   r2Client,
   config,
   key,
-  buffer
+  buffer,
+  contentType
 }: {
-  upload: UploadPngToR2;
+  upload: UploadImageToR2;
   request: FastifyRequest;
   r2Client: ReturnType<typeof createR2Client>;
   config: AppConfig;
   key: string;
   buffer: Buffer;
+  contentType: string;
 }): Promise<string> {
   let lastError: unknown;
   const maxAttempts = config.upload.maxRetries + 1;
@@ -560,7 +750,8 @@ async function uploadWithRetry({
         client: r2Client,
         config: config.r2,
         key,
-        buffer
+        buffer,
+        contentType
       });
     } catch (error) {
       lastError = error;
@@ -590,7 +781,7 @@ export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyIn
     headersTimeout: config.upstream.timeoutMs,
     bodyTimeout: config.upstream.timeoutMs
   });
-  const upload = deps.uploadPngToR2 ?? uploadPngToR2;
+  const upload = deps.uploadImageToR2 ?? deps.uploadPngToR2 ?? uploadImageToR2;
   const adminStore = deps.adminStore ?? new AdminStore(config.admin.dbPath);
   const generationLimiter = new ActiveRequestLimiter(config.limits.maxConcurrentGenerations);
   const imageProcessingLimiter = new ActiveRequestLimiter(config.limits.maxConcurrentImageProcessing);
@@ -744,9 +935,9 @@ export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyIn
       stopUpstreamTimeout = undefined;
 
       const outputData: Array<{ url: string }> = [];
-      const outputImages: Array<{ width: number; height: number; bytes: number; format: string }> = [];
-      const data = Array.isArray(upstreamResponse.data) ? upstreamResponse.data : [];
-      if (data.length === 0) {
+      const outputImages: Array<ImageMetadata & { sourceType: ImageSourceType }> = [];
+      const imageSources = upstreamPayload.strategy.extractImages(upstreamResponse);
+      if (imageSources.length === 0) {
         throw new AppError('new-api returned no image data', {
           statusCode: 502,
           type: 'server_error',
@@ -754,28 +945,33 @@ export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyIn
         });
       }
 
-      for (const item of data) {
-        if (!item.b64_json) {
-          throw new AppError('new-api returned image data without b64_json', {
+      for (const source of imageSources) {
+        const decodeStartedAt = performance.now();
+        const buffer = await loadImageSource({
+          source,
+          config,
+          dispatcher: upstreamDispatcher
+        });
+        const imageMetadata = readImageMetadata(buffer);
+        if (!upstreamPayload.strategy.allowedFormats.includes(imageMetadata.format)) {
+          throw new AppError('Upstream returned unsupported image format for selected strategy', {
             statusCode: 502,
             type: 'server_error',
-            code: 'missing_b64_json'
+            code: 'unsupported_image_format',
+            cause: {
+              strategy: upstreamPayload.strategy.name,
+              format: imageMetadata.format
+            }
           });
         }
-
-        const decodeStartedAt = performance.now();
-        const buffer = decodeBase64Image(item.b64_json);
-        const imageMetadata = readPngMetadata(buffer);
         timings.decode_ms += msSince(decodeStartedAt);
         totalImageBytes += buffer.length;
         outputImages.push({
-          width: imageMetadata.width,
-          height: imageMetadata.height,
-          bytes: buffer.length,
-          format: imageMetadata.format
+          ...imageMetadata,
+          sourceType: source.type
         });
 
-        const key = buildImageKey(config.r2.keyPrefix);
+        const key = buildImageKey(config.r2.keyPrefix, new Date(), undefined, imageMetadata.extension);
         const uploadStartedAt = performance.now();
         let url: string;
         try {
@@ -785,7 +981,8 @@ export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyIn
             r2Client,
             config,
             key,
-            buffer
+            buffer,
+            contentType: imageMetadata.mimeType
           });
         } catch (uploadError) {
           timings.upload_ms += msSince(uploadStartedAt);
@@ -806,7 +1003,7 @@ export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyIn
       }
       imageCount = outputData.length;
       imageUrls = outputData.map((item) => item.url);
-      responseParams = buildResponseParams(upstreamResponse, outputImages);
+      responseParams = buildResponseParams(upstreamResponse, outputImages, upstreamPayload.strategy);
 
       const totalMs = msSince(totalStartedAt);
       request.log.info({

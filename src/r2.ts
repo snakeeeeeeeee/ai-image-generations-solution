@@ -12,24 +12,38 @@ export function createR2Client(config: R2Config): S3Client {
   });
 }
 
-export async function uploadPngToR2({
+export async function uploadImageToR2({
   client,
   config,
   key,
-  buffer
+  buffer,
+  contentType
 }: {
   client: S3Client;
   config: R2Config;
   key: string;
   buffer: Buffer;
+  contentType: string;
 }): Promise<string> {
   await client.send(new PutObjectCommand({
     Bucket: config.bucket,
     Key: key,
     Body: buffer,
-    ContentType: 'image/png',
+    ContentType: contentType,
     CacheControl: config.cacheControl
   }));
 
   return `${config.publicUrl}/${key}`;
+}
+
+export async function uploadPngToR2(args: {
+  client: S3Client;
+  config: R2Config;
+  key: string;
+  buffer: Buffer;
+}): Promise<string> {
+  return uploadImageToR2({
+    ...args,
+    contentType: 'image/png'
+  });
 }

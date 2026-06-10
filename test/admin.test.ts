@@ -7,6 +7,12 @@ import { buildServer } from '../src/server.js';
 import type { AppConfig } from '../src/config.js';
 
 const tinyPngBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=';
+const tinyJpegBuffer = Buffer.from([
+  0xff, 0xd8,
+  0xff, 0xc0, 0x00, 0x11, 0x08, 0x00, 0x01, 0x00, 0x02, 0x03,
+  0x01, 0x11, 0x00, 0x02, 0x11, 0x00, 0x03, 0x11, 0x00,
+  0xff, 0xd9
+]);
 
 type DeepPartial<T> = {
   [K in keyof T]?: T[K] extends object ? DeepPartial<T[K]> : T[K];
@@ -296,6 +302,66 @@ test('successful image requests are recorded without prompt or authorization', a
   assert.equal(JSON.stringify(records).includes('secret-new-api-key'), false);
 
   await app.close();
+  await upstream.close();
+});
+
+test('xAI URL image requests are recorded with R2 image URLs', async () => {
+  const upstream = Fastify();
+  let imageUrl = '';
+
+  upstream.get('/xai-generated.jpg', async (_request, reply) => {
+    reply.header('content-type', 'image/jpeg');
+    return reply.send(tinyJpegBuffer);
+  });
+  upstream.post('/v1/images/generations', async () => ({
+    created: 1780000000,
+    data: [
+      {
+        url: imageUrl,
+        mime_type: 'image/jpeg'
+      }
+    ]
+  }));
+
+  await upstream.listen({ port: 0, host: '127.0.0.1' });
+  const address = upstream.server.address();
+  assert.ok(address && typeof address === 'object');
+  const port = (address as AddressInfo).port;
+  imageUrl = `http://127.0.0.1:${port}/xai-generated.jpg`;
+
+  const store = new AdminStore(':memory:');
+  const app = buildServer(buildTestConfig(`http://127.0.0.1:${port}`), {
+    adminStore: store,
+    uploadImageToR2: async ({ key }) => `https://img.example.com/${key}`
+  });
+
+  const response = await app.inject({
+    method: 'POST',
+    url: '/v1/images/generations',
+    headers: {
+      authorization: 'Bearer secret-new-api-key'
+    },
+    payload: {
+      model: 'grok-imagine-image',
+      prompt: 'do not save me'
+    }
+  });
+  assert.equal(response.statusCode, 200);
+
+  const records = store.getRecentRequests(10);
+  assert.equal(records.length, 1);
+  assert.equal(records[0]?.success, true);
+  assert.equal(records[0]?.model, 'grok-imagine-image');
+  assert.equal(records[0]?.imageCount, 1);
+  assert.equal(records[0]?.imageBytes, tinyJpegBuffer.length);
+  assert.match(records[0]?.imageUrls[0] ?? '', /^https:\/\/img\.example\.com\/images\/\d{4}\/\d{2}\/\d{2}\/.+\.jpg$/);
+  assert.equal(JSON.stringify(records).includes(imageUrl), false);
+  assert.deepEqual(records[0]?.responseParams?.formats, ['jpeg']);
+  assert.deepEqual(records[0]?.responseParams?.sourceTypes, ['url']);
+  assert.equal(records[0]?.responseParams?.strategy, 'xai-grok-imagine');
+
+  await app.close();
+  store.close();
   await upstream.close();
 });
 

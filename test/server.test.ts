@@ -6,6 +6,12 @@ import { buildServer } from '../src/server.js';
 import type { AppConfig } from '../src/config.js';
 
 const tinyPngBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=';
+const tinyJpegBuffer = Buffer.from([
+  0xff, 0xd8,
+  0xff, 0xc0, 0x00, 0x11, 0x08, 0x00, 0x01, 0x00, 0x02, 0x03,
+  0x01, 0x11, 0x00, 0x02, 0x11, 0x00, 0x03, 0x11, 0x00,
+  0xff, 0xd9
+]);
 
 type DeepPartial<T> = {
   [K in keyof T]?: T[K] extends object ? DeepPartial<T[K]> : T[K];
@@ -147,6 +153,215 @@ test('POST /v1/images/generations uploads image and returns URL', async () => {
   assert.equal(body.created, 1780000000);
   assert.equal(body.created_at_beijing, '2026-05-29 04:26:40');
   assert.match(body.data[0]?.url ?? '', /^https:\/\/img\.example\.com\/images\/\d{4}\/\d{2}\/\d{2}\/.+\.png$/);
+
+  await app.close();
+  await upstream.close();
+});
+
+test('POST /v1/images/generations downloads xAI image URLs and uploads JPEG to R2', async () => {
+  const upstream = Fastify();
+  let upstreamRequestBody: Record<string, unknown> | undefined;
+  let imageUrl = '';
+  const uploaded: Array<{ key: string; contentType: string; bytes: number }> = [];
+
+  upstream.get('/xai-generated.jpg', async (_request, reply) => {
+    reply.header('content-type', 'image/jpeg');
+    return reply.send(tinyJpegBuffer);
+  });
+  upstream.post('/v1/images/generations', async (request) => {
+    upstreamRequestBody = request.body as Record<string, unknown>;
+    return {
+      created: 1780000000,
+      data: [
+        {
+          url: imageUrl,
+          mime_type: 'image/jpeg'
+        },
+        {
+          url: imageUrl,
+          mime_type: 'image/jpeg'
+        }
+      ]
+    };
+  });
+
+  await upstream.listen({ port: 0, host: '127.0.0.1' });
+  const upstreamAddress = upstream.server.address();
+  assert.ok(upstreamAddress && typeof upstreamAddress === 'object');
+  const port = (upstreamAddress as AddressInfo).port;
+  imageUrl = `http://127.0.0.1:${port}/xai-generated.jpg`;
+
+  const app = buildServer(buildTestConfig(`http://127.0.0.1:${port}`), {
+    uploadImageToR2: async ({ key, contentType, buffer }) => {
+      uploaded.push({ key, contentType, bytes: buffer.length });
+      return `https://img.example.com/${key}`;
+    }
+  });
+
+  const response = await app.inject({
+    method: 'POST',
+    url: '/v1/images/generations',
+    headers: {
+      authorization: 'Bearer test-key',
+      'content-type': 'application/json'
+    },
+    payload: {
+      model: 'grok-imagine-image-quality',
+      prompt: 'test'
+    }
+  });
+
+  assert.equal(response.statusCode, 200);
+  assert.equal(upstreamRequestBody?.size, undefined);
+  assert.equal(upstreamRequestBody?.output_format, undefined);
+  assert.equal(uploaded.length, 2);
+  assert.equal(uploaded[0]?.contentType, 'image/jpeg');
+  assert.equal(uploaded[0]?.bytes, tinyJpegBuffer.length);
+  assert.match(uploaded[0]?.key ?? '', /^images\/\d{4}\/\d{2}\/\d{2}\/.+\.jpg$/);
+
+  const body = response.json() as { data: Array<{ url: string }> };
+  assert.equal(body.data.length, 2);
+  assert.match(body.data[0]?.url ?? '', /^https:\/\/img\.example\.com\/images\/\d{4}\/\d{2}\/\d{2}\/.+\.jpg$/);
+  assert.match(body.data[1]?.url ?? '', /^https:\/\/img\.example\.com\/images\/\d{4}\/\d{2}\/\d{2}\/.+\.jpg$/);
+
+  await app.close();
+  await upstream.close();
+});
+
+test('POST /v1/images/generations accepts xAI b64_json image responses', async () => {
+  const upstream = Fastify();
+  const uploaded: Array<{ key: string; contentType: string }> = [];
+
+  upstream.post('/v1/images/generations', async () => ({
+    created: 1780000000,
+    data: [
+      {
+        b64_json: tinyPngBase64,
+        mime_type: 'image/png'
+      }
+    ]
+  }));
+
+  await upstream.listen({ port: 0, host: '127.0.0.1' });
+  const upstreamAddress = upstream.server.address();
+  assert.ok(upstreamAddress && typeof upstreamAddress === 'object');
+  const port = (upstreamAddress as AddressInfo).port;
+
+  const app = buildServer(buildTestConfig(`http://127.0.0.1:${port}`), {
+    uploadImageToR2: async ({ key, contentType }) => {
+      uploaded.push({ key, contentType });
+      return `https://img.example.com/${key}`;
+    }
+  });
+
+  const response = await app.inject({
+    method: 'POST',
+    url: '/v1/images/generations',
+    headers: {
+      authorization: 'Bearer test-key',
+      'content-type': 'application/json'
+    },
+    payload: {
+      model: 'grok-imagine-image',
+      prompt: 'test'
+    }
+  });
+
+  assert.equal(response.statusCode, 200);
+  assert.equal(uploaded[0]?.contentType, 'image/png');
+  assert.match(uploaded[0]?.key ?? '', /^images\/\d{4}\/\d{2}\/\d{2}\/.+\.png$/);
+
+  const body = response.json() as { data: Array<{ url: string }> };
+  assert.match(body.data[0]?.url ?? '', /^https:\/\/img\.example\.com\/images\/\d{4}\/\d{2}\/\d{2}\/.+\.png$/);
+
+  await app.close();
+  await upstream.close();
+});
+
+test('POST /v1/images/generations keeps GPT image strategy b64_json-only', async () => {
+  const upstream = Fastify();
+
+  upstream.post('/v1/images/generations', async () => ({
+    created: 1780000000,
+    data: [
+      {
+        url: 'https://example.com/generated.png'
+      }
+    ]
+  }));
+
+  await upstream.listen({ port: 0, host: '127.0.0.1' });
+  const upstreamAddress = upstream.server.address();
+  assert.ok(upstreamAddress && typeof upstreamAddress === 'object');
+  const port = (upstreamAddress as AddressInfo).port;
+
+  const app = buildServer(buildTestConfig(`http://127.0.0.1:${port}`), {
+    uploadImageToR2: async ({ key }) => `https://img.example.com/${key}`
+  });
+
+  const response = await app.inject({
+    method: 'POST',
+    url: '/v1/images/generations',
+    headers: {
+      authorization: 'Bearer test-key',
+      'content-type': 'application/json'
+    },
+    payload: {
+      model: 'gpt-image-2',
+      prompt: 'test'
+    }
+  });
+
+  assert.equal(response.statusCode, 502);
+  assert.equal(response.json().error.code, 'missing_b64_json');
+
+  await app.close();
+  await upstream.close();
+});
+
+test('POST /v1/images/generations rejects xAI image URL with non-image body', async () => {
+  const upstream = Fastify();
+  let imageUrl = '';
+
+  upstream.get('/not-image.txt', async (_request, reply) => {
+    reply.header('content-type', 'text/plain');
+    return reply.send('not image');
+  });
+  upstream.post('/v1/images/generations', async () => ({
+    created: 1780000000,
+    data: [
+      {
+        url: imageUrl,
+        mime_type: 'text/plain'
+      }
+    ]
+  }));
+
+  await upstream.listen({ port: 0, host: '127.0.0.1' });
+  const upstreamAddress = upstream.server.address();
+  assert.ok(upstreamAddress && typeof upstreamAddress === 'object');
+  const port = (upstreamAddress as AddressInfo).port;
+  imageUrl = `http://127.0.0.1:${port}/not-image.txt`;
+
+  const app = buildServer(buildTestConfig(`http://127.0.0.1:${port}`), {
+    uploadImageToR2: async ({ key }) => `https://img.example.com/${key}`
+  });
+
+  const response = await app.inject({
+    method: 'POST',
+    url: '/v1/images/generations',
+    headers: {
+      authorization: 'Bearer test-key',
+      'content-type': 'application/json'
+    },
+    payload: {
+      model: 'grok-imagine-image',
+      prompt: 'test'
+    }
+  });
+
+  assert.equal(response.statusCode, 502);
+  assert.equal(response.json().error.code, 'unsupported_image_format');
 
   await app.close();
   await upstream.close();
