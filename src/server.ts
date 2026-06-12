@@ -2,7 +2,7 @@ import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest }
 import multipart from '@fastify/multipart';
 import { performance } from 'node:perf_hooks';
 import { Agent, fetch as undiciFetch } from 'undici';
-import { registerAdminRoutes } from './admin/routes.js';
+import { registerAdminRoutes, type AdminUploadFile, type AdminUploadResult } from './admin/routes.js';
 import { AdminStore } from './admin/store.js';
 import type { AdminRuntimeStats, ImageRequestRecord } from './admin/types.js';
 import type { AppConfig } from './config.js';
@@ -39,6 +39,7 @@ interface Timings {
 
 type UploadImageToR2 = typeof uploadImageToR2;
 type ImageOperation = 'generation' | 'edit';
+type AdminImageOperation = ImageRequestRecord['operation'];
 
 interface MemorySnapshot {
   rss_bytes: number;
@@ -364,6 +365,32 @@ function formatBeijingTime(unixSeconds: number): string {
     ':',
     pad(date.getUTCSeconds())
   ].join('');
+}
+
+function buildUploadResponseParams(metadata: ImageMetadata, filename: string, key: string): Record<string, unknown> {
+  return {
+    format: metadata.format,
+    width: metadata.width,
+    height: metadata.height,
+    size: `${metadata.width}x${metadata.height}`,
+    bytes: metadata.bytes,
+    count: 1,
+    filename,
+    key
+  };
+}
+
+function readAdminUploadImageMetadata(buffer: Buffer): ImageMetadata {
+  try {
+    return readImageMetadata(buffer);
+  } catch (error) {
+    throw new AppError('Uploaded file must be a PNG, JPEG, or WebP image', {
+      statusCode: 400,
+      type: 'invalid_request_error',
+      code: 'unsupported_upload_image',
+      cause: error
+    });
+  }
 }
 
 async function readUpstreamBody(response: Response): Promise<unknown> {
@@ -848,7 +875,9 @@ export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyIn
   registerAdminRoutes(app, {
     config: config.admin,
     store: adminStore,
-    getRuntimeStats: () => runtimeStats(config, generationLimiter, imageProcessingLimiter, adminStore)
+    getRuntimeStats: () => runtimeStats(config, generationLimiter, imageProcessingLimiter, adminStore),
+    maxUploadBytes: config.bodyLimitBytes,
+    uploadImage: (file, request) => handleAdminImageUpload(file, request)
   });
 
   app.get('/healthz', async () => ({
@@ -1116,6 +1145,138 @@ export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyIn
       stopUpstreamTimeout?.();
       releaseImageProcessingSlot?.();
       releaseGenerationSlot?.();
+    }
+  }
+
+  async function handleAdminImageUpload(
+    file: AdminUploadFile,
+    request: FastifyRequest
+  ): Promise<AdminUploadResult> {
+    const totalStartedAt = performance.now();
+    const operation: AdminImageOperation = 'manual_upload';
+    let uploadMs = 0;
+    let metadata: ImageMetadata | undefined;
+    let key: string | undefined;
+    let url: string | undefined;
+
+    try {
+      if (file.buffer.length === 0) {
+        throw new AppError('Uploaded image file is empty', {
+          statusCode: 400,
+          type: 'invalid_request_error',
+          code: 'empty_upload_file'
+        });
+      }
+
+      assertMemoryAvailable(config);
+      metadata = readAdminUploadImageMetadata(file.buffer);
+      key = buildImageKey(config.r2.keyPrefix, new Date(), undefined, metadata.extension);
+      const uploadStartedAt = performance.now();
+      try {
+        url = await uploadWithRetry({
+          upload,
+          request,
+          r2Client,
+          config,
+          key,
+          buffer: file.buffer,
+          contentType: metadata.mimeType
+        });
+      } catch (uploadError) {
+        uploadMs += msSince(uploadStartedAt);
+        request.log.error({
+          request_id: request.id,
+          r2: r2ErrorDetails(uploadError)
+        }, 'admin r2 upload failed');
+
+        throw new AppError('R2 upload failed', {
+          statusCode: 502,
+          type: 'server_error',
+          code: 'r2_upload_failed'
+        });
+      }
+      uploadMs += msSince(uploadStartedAt);
+
+      const uploadedAt = new Date().toISOString();
+      const totalMs = msSince(totalStartedAt);
+      recordAdminRequest(adminStore, {
+        requestId: request.id,
+        createdAt: uploadedAt,
+        operation,
+        statusCode: 200,
+        success: true,
+        size: `${metadata.width}x${metadata.height}`,
+        requestParams: {
+          filename: file.filename,
+          content_type: file.mimetype,
+          bytes: file.buffer.length
+        },
+        responseParams: buildUploadResponseParams(metadata, file.filename, key),
+        totalMs,
+        openaiMs: 0,
+        decodeMs: 0,
+        uploadMs,
+        imageBytes: metadata.bytes,
+        imageCount: 1,
+        imageUrls: [url]
+      }, request);
+
+      request.log.info({
+        request_id: request.id,
+        operation,
+        upload_ms: uploadMs,
+        total_ms: totalMs,
+        image_bytes: metadata.bytes,
+        image_format: metadata.format,
+        key
+      }, 'admin image uploaded');
+
+      return {
+        url,
+        key,
+        filename: file.filename,
+        contentType: metadata.mimeType,
+        bytes: metadata.bytes,
+        width: metadata.width,
+        height: metadata.height,
+        format: metadata.format,
+        uploadedAt
+      };
+    } catch (error) {
+      const totalMs = msSince(totalStartedAt);
+      request.log.error({
+        request_id: request.id,
+        operation,
+        err: error,
+        upload_ms: uploadMs,
+        total_ms: totalMs
+      }, 'admin image upload failed');
+
+      recordAdminRequest(adminStore, {
+        requestId: request.id,
+        createdAt: new Date().toISOString(),
+        operation,
+        statusCode: getAdminStatusCode(error),
+        success: false,
+        size: metadata ? `${metadata.width}x${metadata.height}` : undefined,
+        requestParams: {
+          filename: file.filename,
+          content_type: file.mimetype,
+          bytes: file.buffer.length
+        },
+        responseParams: metadata && key ? buildUploadResponseParams(metadata, file.filename, key) : undefined,
+        totalMs,
+        openaiMs: 0,
+        decodeMs: 0,
+        uploadMs,
+        imageBytes: metadata?.bytes ?? 0,
+        imageCount: url ? 1 : 0,
+        errorCode: getAdminErrorCode(error),
+        errorMessage: getAdminErrorMessage(error),
+        imageUrls: url ? [url] : []
+      }, request);
+
+      throw error;
     }
   }
 

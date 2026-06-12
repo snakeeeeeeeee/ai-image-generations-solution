@@ -6,11 +6,14 @@ import { join, resolve } from 'node:path';
 import { adminCookieName, createSessionToken, sessionCookieOptions, verifyPassword, verifySessionToken } from './auth.js';
 import type { AdminStore } from './store.js';
 import type { AdminConfig, AdminRuntimeStats } from './types.js';
+import { AppError, sendAppError } from '../errors.js';
 
 interface AdminRoutesOptions {
   config: AdminConfig;
   store: AdminStore;
   getRuntimeStats: () => AdminRuntimeStats;
+  maxUploadBytes: number;
+  uploadImage?: AdminUploadHandler;
 }
 
 interface LoginBody {
@@ -26,6 +29,26 @@ interface DrainBody {
   draining?: boolean;
   reason?: string;
 }
+
+export interface AdminUploadFile {
+  buffer: Buffer;
+  filename: string;
+  mimetype: string;
+}
+
+export interface AdminUploadResult {
+  url: string;
+  key: string;
+  filename: string;
+  contentType: string;
+  bytes: number;
+  width: number;
+  height: number;
+  format: string;
+  uploadedAt: string;
+}
+
+export type AdminUploadHandler = (file: AdminUploadFile, request: FastifyRequest) => Promise<AdminUploadResult>;
 
 export function registerAdminRoutes(app: FastifyInstance, options: AdminRoutesOptions): void {
   app.register(cookie);
@@ -94,6 +117,61 @@ export function registerAdminRoutes(app: FastifyInstance, options: AdminRoutesOp
     };
   });
 
+  app.post(route('/api/upload'), {
+    preHandler: async (request, reply) => requireAdmin(options.config, request, reply)
+  }, async (request, reply) => {
+    if (!options.uploadImage) {
+      return reply.status(501).send({
+        error: {
+          message: '后台上传未启用',
+          code: 'admin_upload_disabled'
+        }
+      });
+    }
+
+    try {
+      if (!request.isMultipart()) {
+        throw new AppError('Request body must be multipart/form-data', {
+          statusCode: 400,
+          type: 'invalid_request_error',
+          code: 'invalid_upload_body'
+        });
+      }
+
+      const part = await request.file({
+        limits: {
+          files: 1,
+          fileSize: options.maxUploadBytes
+        }
+      });
+      if (!part) {
+        throw new AppError('请选择要上传的图片文件', {
+          statusCode: 400,
+          type: 'invalid_request_error',
+          code: 'missing_upload_file'
+        });
+      }
+
+      const result = await options.uploadImage({
+        buffer: await part.toBuffer(),
+        filename: part.filename || 'image',
+        mimetype: part.mimetype || 'application/octet-stream'
+      }, request);
+
+      return reply.send({ data: result });
+    } catch (error) {
+      if (isMultipartFileTooLargeError(error)) {
+        return sendAppError(reply, new AppError('Uploaded image exceeds size limit', {
+          statusCode: 413,
+          type: 'invalid_request_error',
+          code: 'upload_file_too_large'
+        }));
+      }
+
+      return sendAppError(reply, error);
+    }
+  });
+
   app.get(route('/api/requests'), {
     preHandler: async (request, reply) => requireAdmin(options.config, request, reply)
   }, async (request: FastifyRequest<{ Querystring: PageQuery }>) => {
@@ -125,6 +203,15 @@ export function registerAdminRoutes(app: FastifyInstance, options: AdminRoutesOp
   app.get(route('/*'), {
     preHandler: async (request, reply) => requireAdmin(options.config, request, reply)
   }, async (_request, reply) => sendAdminShell(reply, adminDist));
+}
+
+function isMultipartFileTooLargeError(error: unknown): boolean {
+  return Boolean(
+    error &&
+    typeof error === 'object' &&
+    'code' in error &&
+    (error as { code?: unknown }).code === 'FST_REQ_FILE_TOO_LARGE'
+  );
 }
 
 function parseBoundedInt(value: string | undefined, fallback: number, min: number, max: number): number {

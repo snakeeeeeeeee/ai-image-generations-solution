@@ -440,6 +440,128 @@ test('admin request and image APIs return paginated records', async () => {
   await upstream.close();
 });
 
+test('admin can upload local image to R2 and see it in image records', async () => {
+  const upstream = await buildUpstream();
+  const store = new AdminStore(':memory:');
+  let uploadedKey = '';
+  let uploadedContentType = '';
+  let uploadedBytes = 0;
+  const app = buildServer(buildTestConfig(upstream.baseUrl), {
+    adminStore: store,
+    uploadImageToR2: async ({ key, contentType, buffer }) => {
+      uploadedKey = key;
+      uploadedContentType = contentType;
+      uploadedBytes = buffer.length;
+      return `https://img.example.com/${key}`;
+    }
+  });
+
+  const unauthenticatedForm = new FormData();
+  unauthenticatedForm.append('image', new Blob([Buffer.from(tinyPngBase64, 'base64')], { type: 'image/png' }), 'local.png');
+  const unauthenticated = await app.inject({
+    method: 'POST',
+    url: '/image-wrapper/admin/api/upload',
+    payload: unauthenticatedForm
+  });
+  assert.equal(unauthenticated.statusCode, 401);
+
+  const login = await app.inject({
+    method: 'POST',
+    url: '/image-wrapper/admin/login',
+    payload: {
+      password: 'admin-pass'
+    }
+  });
+  const cookie = getCookie(login.headers['set-cookie']);
+
+  const form = new FormData();
+  form.append('image', new Blob([Buffer.from(tinyPngBase64, 'base64')], { type: 'image/png' }), 'local.png');
+  const response = await app.inject({
+    method: 'POST',
+    url: '/image-wrapper/admin/api/upload',
+    headers: {
+      cookie
+    },
+    payload: form
+  });
+  assert.equal(response.statusCode, 200);
+  assert.match(response.json().data.url, /^https:\/\/img\.example\.com\/images\/\d{4}\/\d{2}\/\d{2}\/.+\.png$/);
+  assert.equal(response.json().data.key, uploadedKey);
+  assert.equal(response.json().data.filename, 'local.png');
+  assert.equal(response.json().data.contentType, 'image/png');
+  assert.equal(response.json().data.format, 'png');
+  assert.equal(response.json().data.width, 1);
+  assert.equal(response.json().data.height, 1);
+  assert.equal(response.json().data.bytes, 68);
+  assert.equal(uploadedContentType, 'image/png');
+  assert.equal(uploadedBytes, 68);
+
+  const images = await app.inject({
+    method: 'GET',
+    url: '/image-wrapper/admin/api/images?page=1&page_size=10',
+    headers: {
+      cookie
+    }
+  });
+  assert.equal(images.statusCode, 200);
+  assert.equal(images.json().total, 1);
+  assert.equal(images.json().data[0].operation, 'manual_upload');
+  assert.equal(images.json().data[0].imageUrls[0], response.json().data.url);
+  assert.deepEqual(images.json().data[0].responseParams, {
+    format: 'png',
+    width: 1,
+    height: 1,
+    size: '1x1',
+    bytes: 68,
+    count: 1,
+    filename: 'local.png',
+    key: uploadedKey
+  });
+
+  await app.close();
+  await upstream.close();
+});
+
+test('admin local upload rejects unsupported image files', async () => {
+  const upstream = await buildUpstream();
+  const store = new AdminStore(':memory:');
+  const app = buildServer(buildTestConfig(upstream.baseUrl), {
+    adminStore: store,
+    uploadImageToR2: async ({ key }) => `https://img.example.com/${key}`
+  });
+
+  const login = await app.inject({
+    method: 'POST',
+    url: '/image-wrapper/admin/login',
+    payload: {
+      password: 'admin-pass'
+    }
+  });
+  const cookie = getCookie(login.headers['set-cookie']);
+
+  const form = new FormData();
+  form.append('image', new Blob([Buffer.from('not an image')], { type: 'text/plain' }), 'note.txt');
+  const response = await app.inject({
+    method: 'POST',
+    url: '/image-wrapper/admin/api/upload',
+    headers: {
+      cookie
+    },
+    payload: form
+  });
+  assert.equal(response.statusCode, 400);
+  assert.equal(response.json().error.code, 'unsupported_upload_image');
+
+  const records = store.getRecentRequests(10);
+  assert.equal(records.length, 1);
+  assert.equal(records[0]?.operation, 'manual_upload');
+  assert.equal(records[0]?.success, false);
+  assert.equal(records[0]?.errorCode, 'unsupported_upload_image');
+
+  await app.close();
+  await upstream.close();
+});
+
 test('failed image requests are recorded with error code', async () => {
   const upstream = await buildUpstream();
   const store = new AdminStore(':memory:');

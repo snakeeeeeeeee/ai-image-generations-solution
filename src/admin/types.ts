@@ -17,7 +17,7 @@ export interface AdminDrainState {
 export interface ImageRequestRecord {
   requestId: string;
   createdAt: string;
-  operation: 'generation' | 'edit';
+  operation: 'generation' | 'edit' | 'manual_upload';
   statusCode: number;
   success: boolean;
   model?: string;

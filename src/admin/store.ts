@@ -6,7 +6,7 @@ import type { AdminDrainState, ImageRequestRecord } from './types.js';
 interface RequestRow {
   request_id: string;
   created_at: string;
-  operation: 'generation' | 'edit';
+  operation: 'generation' | 'edit' | 'manual_upload';
   status_code: number;
   success: 0 | 1;
   model: string | null;
@@ -397,7 +397,7 @@ function mapRow(row: RequestRow): ImageRequestRecord {
   return {
     requestId: row.request_id,
     createdAt: row.created_at,
-    operation: row.operation === 'edit' ? 'edit' : 'generation',
+    operation: mapOperation(row.operation),
     statusCode: row.status_code,
     success: row.success === 1,
     model: row.model ?? undefined,
@@ -414,6 +414,14 @@ function mapRow(row: RequestRow): ImageRequestRecord {
     responseParams: safeJsonObject(row.response_params_json),
     imageUrls: safeJsonArray(row.image_urls_json)
   };
+}
+
+function mapOperation(operation: string): ImageRequestRecord['operation'] {
+  if (operation === 'edit' || operation === 'manual_upload') {
+    return operation;
+  }
+
+  return 'generation';
 }
 
 function stringifyJsonObject(value: Record<string, unknown> | undefined): string | null {

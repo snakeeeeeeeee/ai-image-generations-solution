@@ -180,7 +180,8 @@ h2 {
 
 .login-form button,
 .ghost-button,
-.danger-button {
+.danger-button,
+.primary-button {
   min-height: 42px;
   border-radius: 8px;
   border: 1px solid var(--border-strong);
@@ -234,6 +235,12 @@ h2 {
 .ghost-button {
   background: var(--surface-solid);
   color: var(--text);
+  padding: 0 14px;
+}
+
+.primary-button {
+  background: var(--primary);
+  color: var(--primary-text);
   padding: 0 14px;
 }
 
@@ -416,7 +423,8 @@ h2 {
 }
 
 .chart-panel,
-.table-panel {
+.table-panel,
+.upload-panel {
   margin-top: 14px;
 }
 
@@ -431,6 +439,147 @@ h2 {
 .chart-wrap {
   width: 100%;
   min-height: 260px;
+}
+
+.upload-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: stretch;
+}
+
+.upload-picker {
+  min-height: 74px;
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  padding: 14px;
+  border: 1px dashed var(--border-strong);
+  border-radius: 8px;
+  background: var(--surface-solid);
+  cursor: pointer;
+}
+
+.upload-picker.has-file {
+  border-style: solid;
+  background: var(--surface-muted);
+}
+
+.upload-picker input {
+  position: absolute;
+  inline-size: 1px;
+  block-size: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.upload-picker:focus-within {
+  border-color: #2563eb;
+  box-shadow: 0 0 0 3px var(--focus);
+}
+
+.upload-picker-icon {
+  width: 44px;
+  height: 44px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  background: var(--surface-muted);
+  color: var(--text-soft);
+}
+
+.upload-picker strong,
+.upload-picker small {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.upload-picker strong {
+  color: var(--text);
+}
+
+.upload-picker small {
+  margin-top: 2px;
+  color: var(--text-muted);
+}
+
+.upload-actions {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.upload-actions .ghost-button,
+.upload-actions .primary-button {
+  min-width: 90px;
+}
+
+.upload-message,
+.upload-result {
+  margin-top: 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface-solid);
+}
+
+.upload-message {
+  min-height: 42px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.upload-message-error {
+  border-color: rgba(185, 28, 28, 0.45);
+  background: var(--danger-bg);
+  color: var(--danger-text);
+}
+
+.upload-result {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+}
+
+.upload-result-summary {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  color: var(--success-text);
+}
+
+.upload-result-summary span {
+  display: block;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.upload-url {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+}
+
+.upload-url code {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-soft);
+  background: var(--surface-muted);
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  padding: 9px 10px;
+  font-size: 12px;
 }
 
 .chart-tooltip {
@@ -785,7 +934,8 @@ th {
   box-shadow: 0 0 0 3px var(--focus);
 }
 
-.ghost-button:disabled {
+.ghost-button:disabled,
+.primary-button:disabled {
   cursor: not-allowed;
   opacity: 0.52;
 }
@@ -839,6 +989,27 @@ th {
 
   .maintenance-panel button {
     width: 100%;
+  }
+
+  .upload-form {
+    grid-template-columns: 1fr;
+  }
+
+  .upload-actions {
+    width: 100%;
+  }
+
+  .upload-actions .ghost-button,
+  .upload-actions .primary-button {
+    flex: 1;
+  }
+
+  .upload-url {
+    grid-template-columns: 1fr;
+  }
+
+  .upload-url .table-actions {
+    justify-content: flex-end;
   }
 
   .pagination {

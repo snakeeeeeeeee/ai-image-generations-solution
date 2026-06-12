@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import {
   Activity,
@@ -75,7 +75,7 @@ interface Summary {
 interface RequestRecord {
   requestId: string;
   createdAt: string;
-  operation: 'generation' | 'edit';
+  operation: 'generation' | 'edit' | 'manual_upload';
   statusCode: number;
   success: boolean;
   model?: string;
@@ -122,6 +122,18 @@ interface PaginatedRecords {
   pageSize: number;
   total: number;
   totalPages: number;
+}
+
+interface AdminUploadResult {
+  url: string;
+  key: string;
+  filename: string;
+  contentType: string;
+  bytes: number;
+  width: number;
+  height: number;
+  format: string;
+  uploadedAt: string;
 }
 
 type AuthState = 'checking' | 'authenticated' | 'anonymous';
@@ -418,6 +430,8 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
             </button>
           </section>
 
+          <AdminUploadPanel onUploaded={() => void load({ silent: true, requestPage: 1, imagePage: 1 })} />
+
           <section className="status-grid">
             <StatusTile
               icon={<Server size={19} />}
@@ -515,6 +529,123 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
         </div>
       )}
     </main>
+  );
+}
+
+function AdminUploadPanel({ onUploaded }: { onUploaded: () => void }) {
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState('');
+  const [result, setResult] = useState<AdminUploadResult | null>(null);
+
+  function selectFile(event: React.ChangeEvent<HTMLInputElement>) {
+    setUploadError('');
+    setResult(null);
+    setSelectedFile(event.currentTarget.files?.[0] ?? null);
+  }
+
+  function clearFile() {
+    setSelectedFile(null);
+    setUploadError('');
+    if (inputRef.current) {
+      inputRef.current.value = '';
+    }
+  }
+
+  async function submit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!selectedFile) {
+      setUploadError('请选择一张图片。');
+      return;
+    }
+
+    setUploading(true);
+    setUploadError('');
+    try {
+      const form = new FormData();
+      form.append('image', selectedFile, selectedFile.name);
+      const response = await fetchJson<{ data: AdminUploadResult }>(adminPath('/api/upload'), {
+        method: 'POST',
+        body: form
+      });
+      setResult(response.data);
+      clearFile();
+      onUploaded();
+    } catch (error) {
+      setUploadError(error instanceof Error ? error.message : '上传失败，请稍后重试。');
+    } finally {
+      setUploading(false);
+    }
+  }
+
+  return (
+    <section className="panel upload-panel">
+      <div className="panel-heading">
+        <div>
+          <h2>上传图片到 R2</h2>
+          <p>沿用生图日期目录，上传完成后会出现在最近图片中。</p>
+        </div>
+      </div>
+
+      <form className="upload-form" onSubmit={submit}>
+        <label className={`upload-picker ${selectedFile ? 'has-file' : ''}`} htmlFor="admin-image-upload">
+          <input
+            ref={inputRef}
+            id="admin-image-upload"
+            type="file"
+            accept="image/png,image/jpeg,image/webp"
+            onChange={selectFile}
+          />
+          <span className="upload-picker-icon">
+            <UploadCloud size={20} />
+          </span>
+          <span>
+            <strong>{selectedFile ? selectedFile.name : '选择本地图片'}</strong>
+            <small>
+              {selectedFile
+                ? `${formatBytes(selectedFile.size)} · ${selectedFile.type || '未知类型'}`
+                : 'PNG、JPG、WebP'}
+            </small>
+          </span>
+        </label>
+
+        <div className="upload-actions">
+          <button className="ghost-button" type="button" onClick={clearFile} disabled={uploading || !selectedFile}>
+            清空
+          </button>
+          <button className="primary-button" type="submit" disabled={uploading || !selectedFile}>
+            {uploading ? <Loader2 className="spin" size={17} /> : <UploadCloud size={17} />}
+            上传
+          </button>
+        </div>
+      </form>
+
+      {uploadError ? <div className="upload-message upload-message-error"><AlertTriangle size={16} />{uploadError}</div> : null}
+
+      {result ? (
+        <div className="upload-result">
+          <div className="upload-result-summary">
+            <CheckCircle2 size={17} />
+            <div>
+              <strong>上传完成</strong>
+              <span>{result.format.toUpperCase()} · {result.width}x{result.height} · {formatBytes(result.bytes)}</span>
+            </div>
+          </div>
+          <div className="upload-url">
+            <code>{result.url}</code>
+            <div className="table-actions">
+              <a className="icon-button" href={result.url} target="_blank" rel="noreferrer" title="打开 URL" aria-label="打开上传图片 URL">
+                <LinkIcon size={14} />
+              </a>
+              <button className="icon-button" type="button" onClick={() => void navigator.clipboard.writeText(result.url)} title="复制 URL" aria-label="复制上传图片 URL">
+                <Copy size={14} />
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+    </section>
   );
 }
 
@@ -622,7 +753,7 @@ function ImageTable({ page, onPageChange, onPageSizeChange }: {
       <div className="panel-heading">
         <div>
           <h2>最近图片</h2>
-          <p>分页展示成功生成的图片 URL。</p>
+          <p>分页展示成功生成和本地上传的图片 URL。</p>
         </div>
       </div>
       <div className="table-scroll table-scroll-compact">
@@ -969,7 +1100,14 @@ function Pagination({ page, onPageChange, onPageSizeChange }: {
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, init);
   if (!response.ok) {
-    throw new Error(`Request failed: ${response.status}`);
+    let message = `Request failed: ${response.status}`;
+    try {
+      const body = await response.json() as { error?: { message?: string } };
+      message = body.error?.message || message;
+    } catch {
+      // Keep the status-based fallback when the response is not JSON.
+    }
+    throw new Error(message);
   }
   return response.json() as Promise<T>;
 }
@@ -1095,6 +1233,9 @@ function formatDate(value: string): string {
 }
 
 function operationLabel(operation: RequestRecord['operation']): string {
+  if (operation === 'manual_upload') {
+    return '本地上传';
+  }
   return operation === 'edit' ? '图生图' : '文生图';
 }
 
