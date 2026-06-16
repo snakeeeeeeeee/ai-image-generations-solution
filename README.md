@@ -7,6 +7,24 @@ The service accepts `POST /v1/images/generations` and
 new-api, uploads returned `b64_json` PNG images to Cloudflare R2, and returns
 public image URLs instead of base64 JSON.
 
+## GPT-Image-2 model groups
+
+通过 SuperToken 可以使用 GPT-Image-2 生成和编辑图片。根据成本、计费方式和
+参数能力不同，当前建议把图片模型分成两个使用入口：
+
+| Model group | Billing | Upstream path | Parameter support | Recommended use |
+| --- | --- | --- | --- | --- |
+| `gpt-image-2-count` | 按调用次数计费 | GPT 内置生图工具 | 不支持全部官方 API 参数，例如 `n` 只能为 `1`；目前无法生成超过 2K 分辨率的图片 | 低成本单图生成、常规编辑、对高级参数和高分辨率要求不高的场景 |
+| `gpt-image-2` | 按 token 使用量计费 | 官方 Images API 生图 | 支持官方 API 参数能力 | 对分辨率、质量、多图输出或官方参数兼容性有要求的场景 |
+
+选择建议：
+
+- 默认低成本场景优先使用 `gpt-image-2-count`。它按次收费，单张成本更低，
+  适合常规生成和编辑。
+- 如果需要超过 2K 的输出分辨率、更高质量控制、多图输出，或依赖官方 Images
+  API 的完整参数，请使用 `gpt-image-2` 官方生图分组。
+- 本服务会继续把生成结果上传到 R2，并向调用方返回公开图片 URL。
+
 ## Flow
 
 ```text
@@ -143,7 +161,7 @@ Health check:
 curl http://127.0.0.1:8787/healthz
 ```
 
-Image request:
+Low-cost image request with `gpt-image-2-count`:
 
 ```bash
 curl http://127.0.0.1:8787/v1/images/generations \
@@ -152,12 +170,27 @@ curl http://127.0.0.1:8787/v1/images/generations \
   -d '{
     "model": "gpt-image-2-count",
     "prompt": "a mechanical cat watching sunset on a cyberpunk rooftop",
-    "size": "2560x1440",
+    "size": "1024x1024",
     "quality": "high"
   }'
 ```
 
-Image edit request with native multipart parameters:
+Official API image request with `gpt-image-2`:
+
+```bash
+curl http://127.0.0.1:8787/v1/images/generations \
+  -H 'Authorization: Bearer NEW_API_KEY' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "gpt-image-2",
+    "prompt": "a mechanical cat watching sunset on a cyberpunk rooftop",
+    "size": "2560x1440",
+    "quality": "high",
+    "n": 2
+  }'
+```
+
+Low-cost image edit request with native multipart parameters:
 
 ```bash
 curl http://127.0.0.1:8787/v1/images/edits \
@@ -165,24 +198,25 @@ curl http://127.0.0.1:8787/v1/images/edits \
   -F 'model=gpt-image-2-count' \
   -F 'prompt=replace the sky with a clean sunset' \
   -F 'image=@./input.png' \
-  -F 'size=2560x1440'
+  -F 'size=1024x1024'
 ```
 
-Image edit request with JSON image URLs:
+Official API image edit request with JSON image URLs:
 
 ```bash
 curl http://127.0.0.1:8787/v1/images/edits \
   -H 'Authorization: Bearer NEW_API_KEY' \
   -H 'Content-Type: application/json' \
   -d '{
-    "model": "gpt-image-2-count",
+    "model": "gpt-image-2",
     "prompt": "replace the sky with a clean sunset",
     "image": [
       {
         "image_url": "https://example.com/input.png"
       }
     ],
-    "size": "2560x1440"
+    "size": "2560x1440",
+    "quality": "high"
   }'
 ```
 
