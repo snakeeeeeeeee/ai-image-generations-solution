@@ -231,9 +231,11 @@ run_up() {
   if [[ "${FORCE_RECREATE}" == "1" ]]; then
     args+=(--force-recreate)
   fi
-  for scale in "${SCALE_ARGS[@]}"; do
-    args+=(--scale "${scale}")
-  done
+  if [[ ${#SCALE_ARGS[@]} -gt 0 ]]; then
+    for scale in "${SCALE_ARGS[@]}"; do
+      args+=(--scale "${scale}")
+    done
+  fi
   args+=("${services[@]}")
   compose "${args[@]}"
 }
