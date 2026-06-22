@@ -9,6 +9,7 @@ export interface AppConfig {
   host: string;
   logLevel: string;
   bodyLimitBytes: number;
+  role: AppRole;
   limits: {
     maxConcurrentGenerations: number;
     maxConcurrentImageProcessing: number;
@@ -19,10 +20,11 @@ export interface AppConfig {
     imagesPath: string;
     imageEditsPath: string;
     timeoutMs: number;
+    apiKey?: string;
   };
   defaults: {
     size: string;
-    outputFormat: 'png';
+    outputFormat: ImageOutputFormat;
   };
   upload: {
     maxRetries: number;
@@ -35,7 +37,11 @@ export interface AppConfig {
   };
   r2: R2Config;
   admin: AdminConfig;
+  asyncTasks: AsyncTaskConfig;
 }
+
+export type AppRole = 'api' | 'worker' | 'notifier' | 'all';
+export type ImageOutputFormat = 'png' | 'jpeg' | 'webp';
 
 export interface R2Config {
   endpoint: string;
@@ -45,6 +51,23 @@ export interface R2Config {
   publicUrl: string;
   keyPrefix: string;
   cacheControl: string;
+  forcePathStyle: boolean;
+}
+
+export interface AsyncTaskConfig {
+  postgresUrl: string;
+  redisUrl: string;
+  providerApiKeys: string[];
+  workerConcurrency: number;
+  imageProcessingConcurrency: number;
+  globalRateLimitIpm: number;
+  providerRateLimitConfig: Record<string, number>;
+  callbackBatchSize: number;
+  callbackFlushMs: number;
+  callbackMaxRetryAgeHours: number;
+  callbackDefaultSecret: string;
+  callbackSecrets: Record<string, string>;
+  taskStaleProcessingTimeoutSeconds: number;
 }
 
 function requireEnv(name: string): string {
@@ -86,12 +109,20 @@ function normalizeBasePath(value: string): string {
   return normalized === '' ? '/' : normalized;
 }
 
-function normalizePngFormat(value: string): 'png' {
+function normalizeRole(value: string): AppRole {
   const normalized = value.toLowerCase();
-  if (normalized !== 'png') {
-    throw new Error(`DEFAULT_OUTPUT_FORMAT must be png, received: ${value}`);
+  if (normalized === 'api' || normalized === 'worker' || normalized === 'notifier' || normalized === 'all') {
+    return normalized;
   }
-  return 'png';
+  throw new Error(`IMAGE_HANDLE_ROLE must be api, worker, notifier, or all; received: ${value}`);
+}
+
+function normalizeOutputFormat(value: string): ImageOutputFormat {
+  const normalized = value.toLowerCase();
+  if (normalized === 'png' || normalized === 'jpeg' || normalized === 'webp') {
+    return normalized;
+  }
+  throw new Error(`DEFAULT_OUTPUT_FORMAT must be png, jpeg, or webp; received: ${value}`);
 }
 
 function parseCsvEnv(name: string, fallback: string): string[] {
@@ -101,12 +132,62 @@ function parseCsvEnv(name: string, fallback: string): string[] {
     .filter(Boolean);
 }
 
+function parseBooleanEnv(name: string, fallback: boolean): boolean {
+  const value = optionalEnv(name, fallback ? 'true' : 'false').toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(value)) {
+    return true;
+  }
+  if (['0', 'false', 'no', 'off'].includes(value)) {
+    return false;
+  }
+  throw new Error(`Invalid boolean for ${name}: ${value}`);
+}
+
+function parseJsonObjectEnv(name: string, fallback: string): Record<string, unknown> {
+  const raw = optionalEnv(name, fallback);
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error('not an object');
+    }
+    return parsed as Record<string, unknown>;
+  } catch (error) {
+    throw new Error(`Invalid JSON object for ${name}: ${raw}`, { cause: error });
+  }
+}
+
+function parseNumberMapEnv(name: string, fallback: string): Record<string, number> {
+  const raw = parseJsonObjectEnv(name, fallback);
+  const result: Record<string, number> = {};
+  for (const [key, value] of Object.entries(raw)) {
+    const parsed = typeof value === 'number' ? value : Number.parseInt(String(value), 10);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      throw new Error(`Invalid positive number for ${name}.${key}: ${String(value)}`);
+    }
+    result[key] = parsed;
+  }
+  return result;
+}
+
+function parseStringMapEnv(name: string, fallback: string): Record<string, string> {
+  const raw = parseJsonObjectEnv(name, fallback);
+  const result: Record<string, string> = {};
+  for (const [key, value] of Object.entries(raw)) {
+    if (typeof value !== 'string') {
+      throw new Error(`Invalid string for ${name}.${key}: ${String(value)}`);
+    }
+    result[key] = value;
+  }
+  return result;
+}
+
 export function loadConfig(): AppConfig {
   return {
     port: parsePositiveInt('PORT', 8787),
     host: optionalEnv('HOST', '0.0.0.0'),
     logLevel: optionalEnv('LOG_LEVEL', 'info'),
     bodyLimitBytes: parsePositiveInt('REQUEST_BODY_LIMIT_BYTES', DEFAULT_BODY_LIMIT_BYTES),
+    role: normalizeRole(optionalEnv('IMAGE_HANDLE_ROLE', 'api')),
     limits: {
       maxConcurrentGenerations: parsePositiveInt('MAX_CONCURRENT_GENERATIONS', 1000),
       maxConcurrentImageProcessing: parsePositiveInt('MAX_CONCURRENT_IMAGE_PROCESSING', 50),
@@ -116,11 +197,12 @@ export function loadConfig(): AppConfig {
       baseUrl: normalizeBaseUrl(requireEnv('NEW_API_BASE_URL')),
       imagesPath: normalizePath(optionalEnv('NEW_API_IMAGES_PATH', '/v1/images/generations')),
       imageEditsPath: normalizePath(optionalEnv('NEW_API_IMAGES_EDITS_PATH', '/v1/images/edits')),
-      timeoutMs: parsePositiveInt('UPSTREAM_TIMEOUT_MS', 30 * 60 * 1000)
+      timeoutMs: parsePositiveInt('UPSTREAM_TIMEOUT_MS', 30 * 60 * 1000),
+      apiKey: optionalEnv('UPSTREAM_API_KEY', '') || undefined
     },
     defaults: {
       size: optionalEnv('DEFAULT_IMAGE_SIZE', '2560x1440'),
-      outputFormat: normalizePngFormat(optionalEnv('DEFAULT_OUTPUT_FORMAT', 'png'))
+      outputFormat: normalizeOutputFormat(optionalEnv('DEFAULT_OUTPUT_FORMAT', 'png'))
     },
     upload: {
       maxRetries: parsePositiveInt('R2_UPLOAD_MAX_RETRIES', 3),
@@ -138,7 +220,8 @@ export function loadConfig(): AppConfig {
       bucket: requireEnv('R2_BUCKET'),
       publicUrl: normalizeBaseUrl(requireEnv('R2_PUBLIC_URL')),
       keyPrefix: optionalEnv('R2_KEY_PREFIX', 'images').replace(/^\/+|\/+$/g, ''),
-      cacheControl: optionalEnv('R2_CACHE_CONTROL', 'public, max-age=86400')
+      cacheControl: optionalEnv('R2_CACHE_CONTROL', 'public, max-age=86400'),
+      forcePathStyle: parseBooleanEnv('R2_FORCE_PATH_STYLE', false)
     },
     admin: {
       basePath: normalizeBasePath(optionalEnv('ADMIN_BASE_PATH', '/image-wrapper/admin')),
@@ -148,6 +231,21 @@ export function loadConfig(): AppConfig {
       retentionDays: parsePositiveInt('ADMIN_RETENTION_DAYS', 7),
       recentLimit: parsePositiveInt('ADMIN_RECENT_LIMIT', 1000),
       cookieSecure: optionalEnv('NODE_ENV', 'development') === 'production'
+    },
+    asyncTasks: {
+      postgresUrl: optionalEnv('POSTGRES_URL', ''),
+      redisUrl: optionalEnv('REDIS_URL', ''),
+      providerApiKeys: parseCsvEnv('PROVIDER_API_KEYS', ''),
+      workerConcurrency: parsePositiveInt('WORKER_CONCURRENCY', 20),
+      imageProcessingConcurrency: parsePositiveInt('IMAGE_PROCESSING_CONCURRENCY', 10),
+      globalRateLimitIpm: parsePositiveInt('GLOBAL_RATE_LIMIT_IPM', 250),
+      providerRateLimitConfig: parseNumberMapEnv('PROVIDER_RATE_LIMIT_CONFIG_JSON', '{}'),
+      callbackBatchSize: parsePositiveInt('CALLBACK_BATCH_SIZE', 50),
+      callbackFlushMs: parsePositiveInt('CALLBACK_FLUSH_MS', 2000),
+      callbackMaxRetryAgeHours: parsePositiveInt('CALLBACK_MAX_RETRY_AGE_HOURS', 24),
+      callbackDefaultSecret: optionalEnv('CALLBACK_DEFAULT_SECRET', ''),
+      callbackSecrets: parseStringMapEnv('CALLBACK_SECRETS_JSON', '{}'),
+      taskStaleProcessingTimeoutSeconds: parsePositiveInt('TASK_STALE_PROCESSING_TIMEOUT_SECONDS', 1800)
     }
   };
 }

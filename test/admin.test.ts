@@ -5,6 +5,8 @@ import Fastify from 'fastify';
 import { AdminStore } from '../src/admin/store.js';
 import { buildServer } from '../src/server.js';
 import type { AppConfig } from '../src/config.js';
+import type { AsyncTaskStore } from '../src/async/store.js';
+import type { QueueClients } from '../src/async/queue.js';
 
 const tinyPngBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=';
 const tinyJpegBuffer = Buffer.from([
@@ -24,6 +26,7 @@ function buildTestConfig(baseUrl: string, overrides: DeepPartial<AppConfig> = {}
     host: '127.0.0.1',
     logLevel: 'silent',
     bodyLimitBytes: 100 * 1024 * 1024,
+    role: 'api',
     limits: {
       maxConcurrentGenerations: 1000,
       maxConcurrentImageProcessing: 50,
@@ -55,7 +58,8 @@ function buildTestConfig(baseUrl: string, overrides: DeepPartial<AppConfig> = {}
       bucket: 'test-image-bucket',
       publicUrl: 'https://img.example.com',
       keyPrefix: 'images',
-      cacheControl: 'public, max-age=86400'
+      cacheControl: 'public, max-age=86400',
+      forcePathStyle: false
     },
     admin: {
       basePath: '/image-wrapper/admin',
@@ -65,6 +69,21 @@ function buildTestConfig(baseUrl: string, overrides: DeepPartial<AppConfig> = {}
       retentionDays: 7,
       recentLimit: 1000,
       cookieSecure: false
+    },
+    asyncTasks: {
+      postgresUrl: '',
+      redisUrl: '',
+      providerApiKeys: [],
+      workerConcurrency: 20,
+      imageProcessingConcurrency: 10,
+      globalRateLimitIpm: 250,
+      providerRateLimitConfig: {},
+      callbackBatchSize: 50,
+      callbackFlushMs: 2000,
+      callbackMaxRetryAgeHours: 24,
+      callbackDefaultSecret: 'test-callback-secret',
+      callbackSecrets: {},
+      taskStaleProcessingTimeoutSeconds: 1800
     }
   };
 
@@ -98,6 +117,21 @@ function buildTestConfig(baseUrl: string, overrides: DeepPartial<AppConfig> = {}
     admin: {
       ...base.admin,
       ...overrides.admin
+    },
+    asyncTasks: {
+      postgresUrl: overrides.asyncTasks?.postgresUrl ?? base.asyncTasks.postgresUrl,
+      redisUrl: overrides.asyncTasks?.redisUrl ?? base.asyncTasks.redisUrl,
+      providerApiKeys: overrides.asyncTasks?.providerApiKeys?.filter((item): item is string => typeof item === 'string') ?? base.asyncTasks.providerApiKeys,
+      workerConcurrency: overrides.asyncTasks?.workerConcurrency ?? base.asyncTasks.workerConcurrency,
+      imageProcessingConcurrency: overrides.asyncTasks?.imageProcessingConcurrency ?? base.asyncTasks.imageProcessingConcurrency,
+      globalRateLimitIpm: overrides.asyncTasks?.globalRateLimitIpm ?? base.asyncTasks.globalRateLimitIpm,
+      providerRateLimitConfig: base.asyncTasks.providerRateLimitConfig,
+      callbackBatchSize: overrides.asyncTasks?.callbackBatchSize ?? base.asyncTasks.callbackBatchSize,
+      callbackFlushMs: overrides.asyncTasks?.callbackFlushMs ?? base.asyncTasks.callbackFlushMs,
+      callbackMaxRetryAgeHours: overrides.asyncTasks?.callbackMaxRetryAgeHours ?? base.asyncTasks.callbackMaxRetryAgeHours,
+      callbackDefaultSecret: overrides.asyncTasks?.callbackDefaultSecret ?? base.asyncTasks.callbackDefaultSecret,
+      callbackSecrets: base.asyncTasks.callbackSecrets,
+      taskStaleProcessingTimeoutSeconds: overrides.asyncTasks?.taskStaleProcessingTimeoutSeconds ?? base.asyncTasks.taskStaleProcessingTimeoutSeconds
     }
   };
 }
@@ -180,6 +214,202 @@ test('admin login succeeds and protects API routes', async () => {
   });
   assert.equal(authenticated.statusCode, 200);
   assert.equal(typeof authenticated.json().runtime.activeGenerations, 'number');
+
+  await app.close();
+  await upstream.close();
+});
+
+test('admin async APIs report disabled empty state without async infra', async () => {
+  const upstream = await buildUpstream();
+  const app = buildServer(buildTestConfig(upstream.baseUrl), {
+    uploadPngToR2: async ({ key }) => `https://img.example.com/${key}`
+  });
+
+  const login = await app.inject({
+    method: 'POST',
+    url: '/image-wrapper/admin/login',
+    payload: {
+      password: 'admin-pass'
+    }
+  });
+  const cookie = getCookie(login.headers['set-cookie']);
+
+  const summary = await app.inject({
+    method: 'GET',
+    url: '/image-wrapper/admin/api/async/summary',
+    headers: {
+      cookie
+    }
+  });
+  assert.equal(summary.statusCode, 200);
+  assert.equal(summary.json().enabled, false);
+  assert.equal(summary.json().tasks.total, 0);
+  assert.equal(summary.json().callbacks.total, 0);
+  assert.equal(summary.json().queue, null);
+
+  const tasks = await app.inject({
+    method: 'GET',
+    url: '/image-wrapper/admin/api/async/tasks?page=1&page_size=10',
+    headers: {
+      cookie
+    }
+  });
+  assert.equal(tasks.statusCode, 200);
+  assert.equal(tasks.json().total, 0);
+  assert.deepEqual(tasks.json().data, []);
+
+  const callbacks = await app.inject({
+    method: 'GET',
+    url: '/image-wrapper/admin/api/async/callbacks?page=1&page_size=10',
+    headers: {
+      cookie
+    }
+  });
+  assert.equal(callbacks.statusCode, 200);
+  assert.equal(callbacks.json().total, 0);
+  assert.deepEqual(callbacks.json().data, []);
+
+  await app.close();
+  await upstream.close();
+});
+
+test('admin async APIs expose task callback and queue status', async () => {
+  const upstream = await buildUpstream();
+  const fakeAsyncStore = {
+    getAdminTaskSummary: async () => ({
+      total: 2,
+      submitted: 0,
+      queued: 1,
+      processing: 0,
+      succeeded: 1,
+      failed: 0,
+      lastCreatedAt: '2026-06-22T01:00:00.000Z',
+      lastUpdatedAt: '2026-06-22T01:01:00.000Z'
+    }),
+    getAdminCallbackSummary: async () => ({
+      total: 1,
+      pending: 1,
+      processing: 0,
+      delivered: 0,
+      failed: 0,
+      lastCreatedAt: '2026-06-22T01:02:00.000Z',
+      lastUpdatedAt: '2026-06-22T01:02:00.000Z'
+    }),
+    getAdminTasksPage: async (page: number, pageSize: number) => ({
+      data: [
+        {
+          provider_task_id: 'imgtask_1',
+          client_task_id: 'task_1',
+          request_id: 'req_1',
+          provider: 'openai',
+          model: 'gpt-image-2',
+          operation: 'generation',
+          status: 'succeeded',
+          parameters: {
+            size: '1024x1024',
+            output_format: 'png'
+          },
+          metadata: {
+            channel_id: 'channel_123'
+          },
+          attempts: 1,
+          image_count: 1,
+          first_image_url: 'https://img.example.com/images/test.png',
+          created_at: '2026-06-22T01:00:00.000Z',
+          started_at: '2026-06-22T01:00:01.000Z',
+          finished_at: '2026-06-22T01:00:10.000Z',
+          updated_at: '2026-06-22T01:00:10.000Z'
+        }
+      ],
+      page,
+      pageSize,
+      total: 1,
+      totalPages: 1
+    }),
+    getAdminCallbackEventsPage: async (page: number, pageSize: number) => ({
+      data: [
+        {
+          event_id: 'evt_1',
+          provider_task_id: 'imgtask_1',
+          client_task_id: 'task_1',
+          callback_url: 'https://new-api.example.com/callback/task_1',
+          batch_callback_url: 'https://new-api.example.com/callback/batch',
+          secret_id: 'channel_123',
+          status: 'pending',
+          attempts: 1,
+          next_attempt_at: '2026-06-22T01:05:00.000Z',
+          created_at: '2026-06-22T01:02:00.000Z',
+          updated_at: '2026-06-22T01:02:00.000Z'
+        }
+      ],
+      page,
+      pageSize,
+      total: 1,
+      totalPages: 1
+    })
+  } as unknown as AsyncTaskStore;
+  const fakeQueueClients = {
+    taskQueue: {
+      getJobCounts: async () => ({
+        waiting: 3,
+        active: 1,
+        delayed: 2,
+        completed: 9,
+        failed: 1,
+        paused: 0
+      })
+    }
+  } as unknown as QueueClients;
+  const app = buildServer(buildTestConfig(upstream.baseUrl), {
+    asyncTaskStore: fakeAsyncStore,
+    queueClients: fakeQueueClients,
+    uploadPngToR2: async ({ key }) => `https://img.example.com/${key}`
+  });
+
+  const login = await app.inject({
+    method: 'POST',
+    url: '/image-wrapper/admin/login',
+    payload: {
+      password: 'admin-pass'
+    }
+  });
+  const cookie = getCookie(login.headers['set-cookie']);
+
+  const summary = await app.inject({
+    method: 'GET',
+    url: '/image-wrapper/admin/api/async/summary',
+    headers: {
+      cookie
+    }
+  });
+  assert.equal(summary.statusCode, 200);
+  assert.equal(summary.json().enabled, true);
+  assert.equal(summary.json().tasks.queued, 1);
+  assert.equal(summary.json().callbacks.pending, 1);
+  assert.equal(summary.json().queue.waiting, 3);
+  assert.equal(summary.json().queue.failed, 1);
+
+  const tasks = await app.inject({
+    method: 'GET',
+    url: '/image-wrapper/admin/api/async/tasks?page=1&page_size=10',
+    headers: {
+      cookie
+    }
+  });
+  assert.equal(tasks.statusCode, 200);
+  assert.equal(tasks.json().data[0].client_task_id, 'task_1');
+  assert.equal(tasks.json().data[0].first_image_url, 'https://img.example.com/images/test.png');
+
+  const callbacks = await app.inject({
+    method: 'GET',
+    url: '/image-wrapper/admin/api/async/callbacks?page=1&page_size=10',
+    headers: {
+      cookie
+    }
+  });
+  assert.equal(callbacks.statusCode, 200);
+  assert.equal(callbacks.json().data[0].event_id, 'evt_1');
+  assert.equal(callbacks.json().data[0].secret_id, 'channel_123');
 
   await app.close();
   await upstream.close();

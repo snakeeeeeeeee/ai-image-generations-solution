@@ -19,7 +19,7 @@ export interface ImageRequestBody {
 
 export interface ImageDefaults {
   size: string;
-  outputFormat: 'png';
+  outputFormat: ImageFormat;
 }
 
 export interface PngMetadata {

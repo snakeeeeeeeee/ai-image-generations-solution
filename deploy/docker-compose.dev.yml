@@ -1,0 +1,120 @@
+name: image-handle-dev
+
+x-app-build: &app-build
+  context: ..
+  dockerfile: Dockerfile
+
+x-app-image: &app-image ${IMAGE_HANDLE_IMAGE:-image-handle:dev}
+
+services:
+  image-handle-postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: image_handle
+      POSTGRES_USER: image_handle
+      POSTGRES_PASSWORD: image_handle
+    ports:
+      - "${POSTGRES_HOST_PORT:-5432}:5432"
+    volumes:
+      - image-handle-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U image_handle -d image_handle"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  image-handle-redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "${REDIS_HOST_PORT:-6379}:6379"
+    volumes:
+      - image-handle-redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  mock-new-api:
+    image: *app-image
+    build: *app-build
+    restart: unless-stopped
+    command: ["node", "dist/scripts/mock-new-api.js"]
+    environment:
+      MOCK_NEW_API_HOST: 0.0.0.0
+      MOCK_NEW_API_PORT: ${MOCK_NEW_API_PORT:-3999}
+    ports:
+      - "${MOCK_NEW_API_HOST_PORT:-3999}:${MOCK_NEW_API_PORT:-3999}"
+
+  image-api:
+    image: *app-image
+    build: *app-build
+    restart: unless-stopped
+    depends_on:
+      image-handle-postgres:
+        condition: service_healthy
+      image-handle-redis:
+        condition: service_healthy
+      mock-new-api:
+        condition: service_started
+    env_file:
+      - ${IMAGE_HANDLE_ENV_FILE:-./.env}
+    environment:
+      IMAGE_HANDLE_ROLE: api
+      HOST: ${HOST:-0.0.0.0}
+      PORT: ${PORT:-8787}
+      POSTGRES_URL: postgres://image_handle:image_handle@image-handle-postgres:5432/image_handle
+      REDIS_URL: redis://image-handle-redis:6379
+      NEW_API_BASE_URL: http://mock-new-api:${MOCK_NEW_API_PORT:-3999}
+      PROVIDER_API_KEYS: ${PROVIDER_API_KEYS:-provider-test-key}
+      UPSTREAM_API_KEY: ${UPSTREAM_API_KEY:-local-upstream-key}
+      CALLBACK_DEFAULT_SECRET: ${CALLBACK_DEFAULT_SECRET:-local-callback-secret}
+    ports:
+      - "${IMAGE_API_HOST_PORT:-8787}:${PORT:-8787}"
+
+  image-worker:
+    image: *app-image
+    build: *app-build
+    restart: unless-stopped
+    depends_on:
+      image-handle-postgres:
+        condition: service_healthy
+      image-handle-redis:
+        condition: service_healthy
+      mock-new-api:
+        condition: service_started
+    env_file:
+      - ${IMAGE_HANDLE_ENV_FILE:-./.env}
+    environment:
+      IMAGE_HANDLE_ROLE: worker
+      POSTGRES_URL: postgres://image_handle:image_handle@image-handle-postgres:5432/image_handle
+      REDIS_URL: redis://image-handle-redis:6379
+      NEW_API_BASE_URL: http://mock-new-api:${MOCK_NEW_API_PORT:-3999}
+      PROVIDER_API_KEYS: ${PROVIDER_API_KEYS:-provider-test-key}
+      UPSTREAM_API_KEY: ${UPSTREAM_API_KEY:-local-upstream-key}
+      CALLBACK_DEFAULT_SECRET: ${CALLBACK_DEFAULT_SECRET:-local-callback-secret}
+
+  image-notifier:
+    image: *app-image
+    build: *app-build
+    restart: unless-stopped
+    depends_on:
+      image-handle-postgres:
+        condition: service_healthy
+      image-handle-redis:
+        condition: service_healthy
+    env_file:
+      - ${IMAGE_HANDLE_ENV_FILE:-./.env}
+    environment:
+      IMAGE_HANDLE_ROLE: notifier
+      POSTGRES_URL: postgres://image_handle:image_handle@image-handle-postgres:5432/image_handle
+      REDIS_URL: redis://image-handle-redis:6379
+      PROVIDER_API_KEYS: ${PROVIDER_API_KEYS:-provider-test-key}
+      CALLBACK_DEFAULT_SECRET: ${CALLBACK_DEFAULT_SECRET:-local-callback-secret}
+
+volumes:
+  image-handle-postgres-data:
+  image-handle-redis-data:

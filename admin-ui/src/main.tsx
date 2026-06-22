@@ -17,6 +17,7 @@ import {
   LogOut,
   MemoryStick,
   RefreshCw,
+  Send,
   Server,
   UploadCloud,
   X,
@@ -102,9 +103,85 @@ interface ErrorRecord {
 interface DashboardData {
   runtime: RuntimeStats;
   summary: Summary;
+  async: AsyncOverview;
+  asyncTasks: PaginatedAsyncTasks;
+  callbacks: PaginatedCallbacks;
   errors: PaginatedErrors;
   requests: PaginatedRecords;
   images: PaginatedRecords;
+}
+
+interface AsyncTaskSummary {
+  total: number;
+  submitted: number;
+  queued: number;
+  processing: number;
+  succeeded: number;
+  failed: number;
+  lastCreatedAt?: string;
+  lastUpdatedAt?: string;
+}
+
+interface CallbackSummary {
+  total: number;
+  pending: number;
+  processing: number;
+  delivered: number;
+  failed: number;
+  lastCreatedAt?: string;
+  lastUpdatedAt?: string;
+}
+
+interface QueueStats {
+  waiting: number;
+  active: number;
+  delayed: number;
+  completed: number;
+  failed: number;
+  paused: number;
+}
+
+interface AsyncOverview {
+  enabled: boolean;
+  tasks: AsyncTaskSummary;
+  callbacks: CallbackSummary;
+  queue: QueueStats | null;
+}
+
+interface AsyncTaskRecord {
+  provider_task_id: string;
+  client_task_id: string;
+  request_id: string;
+  provider: string;
+  model: string;
+  operation: 'generation' | 'edit';
+  status: 'submitted' | 'queued' | 'processing' | 'succeeded' | 'failed';
+  parameters: Record<string, unknown>;
+  metadata: Record<string, unknown>;
+  attempts: number;
+  image_count: number;
+  first_image_url?: string;
+  error_code?: string;
+  error_message?: string;
+  created_at: string;
+  started_at?: string;
+  finished_at?: string;
+  updated_at: string;
+}
+
+interface CallbackEventRecord {
+  event_id: string;
+  provider_task_id: string;
+  client_task_id: string;
+  callback_url: string;
+  batch_callback_url?: string;
+  secret_id?: string;
+  status: 'pending' | 'processing' | 'delivered' | 'failed';
+  attempts: number;
+  next_attempt_at: string;
+  delivered_at?: string;
+  created_at: string;
+  updated_at: string;
 }
 
 interface PaginatedErrors {
@@ -118,6 +195,22 @@ interface PaginatedErrors {
 
 interface PaginatedRecords {
   data: RequestRecord[];
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
+}
+
+interface PaginatedAsyncTasks {
+  data: AsyncTaskRecord[];
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
+}
+
+interface PaginatedCallbacks {
+  data: CallbackEventRecord[];
   page: number;
   pageSize: number;
   total: number;
@@ -138,6 +231,7 @@ interface AdminUploadResult {
 
 type AuthState = 'checking' | 'authenticated' | 'anonymous';
 type RefreshIntervalMs = 5000 | 15000 | 30000 | 60000;
+type DashboardTab = 'sync' | 'async';
 
 const adminBasePath = new URL(import.meta.env.BASE_URL, window.location.origin).pathname.replace(/\/+$/, '');
 const adminPath = (path = '') => `${adminBasePath}${path}`;
@@ -241,11 +335,16 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
   const [data, setData] = useState<DashboardData | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [activeTab, setActiveTab] = useState<DashboardTab>('sync');
   const [refreshIntervalMs, setRefreshIntervalMs] = useState<RefreshIntervalMs>(5000);
   const [requestPage, setRequestPage] = useState(1);
   const [requestPageSize, setRequestPageSize] = useState(20);
   const [imagePage, setImagePage] = useState(1);
   const [imagePageSize, setImagePageSize] = useState(10);
+  const [asyncTaskPage, setAsyncTaskPage] = useState(1);
+  const [asyncTaskPageSize, setAsyncTaskPageSize] = useState(10);
+  const [callbackPage, setCallbackPage] = useState(1);
+  const [callbackPageSize, setCallbackPageSize] = useState(10);
   const [errorPage, setErrorPage] = useState(1);
   const errorPageSize = 5;
   const [error, setError] = useState('');
@@ -257,6 +356,10 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
     requestPageSize?: number;
     imagePage?: number;
     imagePageSize?: number;
+    asyncTaskPage?: number;
+    asyncTaskPageSize?: number;
+    callbackPage?: number;
+    callbackPageSize?: number;
     errorPage?: number;
   } = {}) {
     if (options.silent) {
@@ -270,9 +373,16 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
       const nextRequestPageSize = options.requestPageSize ?? requestPageSize;
       const nextImagePage = options.imagePage ?? imagePage;
       const nextImagePageSize = options.imagePageSize ?? imagePageSize;
+      const nextAsyncTaskPage = options.asyncTaskPage ?? asyncTaskPage;
+      const nextAsyncTaskPageSize = options.asyncTaskPageSize ?? asyncTaskPageSize;
+      const nextCallbackPage = options.callbackPage ?? callbackPage;
+      const nextCallbackPageSize = options.callbackPageSize ?? callbackPageSize;
       const nextErrorPage = options.errorPage ?? errorPage;
-      const [summary, requests, images, errors] = await Promise.all([
+      const [summary, asyncOverview, asyncTasks, callbacks, requests, images, errors] = await Promise.all([
         fetchJson<{ runtime: RuntimeStats; summary: Summary }>(adminPath('/api/summary')),
+        fetchJson<AsyncOverview>(adminPath('/api/async/summary')),
+        fetchJson<PaginatedAsyncTasks>(adminPath(`/api/async/tasks?page=${nextAsyncTaskPage}&page_size=${nextAsyncTaskPageSize}`)),
+        fetchJson<PaginatedCallbacks>(adminPath(`/api/async/callbacks?page=${nextCallbackPage}&page_size=${nextCallbackPageSize}`)),
         fetchJson<PaginatedRecords>(adminPath(`/api/requests?page=${nextRequestPage}&page_size=${nextRequestPageSize}`)),
         fetchJson<PaginatedRecords>(adminPath(`/api/images?page=${nextImagePage}&page_size=${nextImagePageSize}`)),
         fetchJson<PaginatedErrors>(adminPath(`/api/errors?page=${nextErrorPage}&page_size=${errorPageSize}`))
@@ -281,10 +391,17 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
       setRequestPageSize(requests.pageSize);
       setImagePage(images.page);
       setImagePageSize(images.pageSize);
+      setAsyncTaskPage(asyncTasks.page);
+      setAsyncTaskPageSize(asyncTasks.pageSize);
+      setCallbackPage(callbacks.page);
+      setCallbackPageSize(callbacks.pageSize);
       setErrorPage(errors.page);
       setData({
         runtime: summary.runtime,
         summary: summary.summary,
+        async: asyncOverview,
+        asyncTasks,
+        callbacks,
         errors,
         requests,
         images
@@ -307,7 +424,18 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
   useEffect(() => {
     const timer = window.setInterval(() => void load({ silent: true }), refreshIntervalMs);
     return () => window.clearInterval(timer);
-  }, [refreshIntervalMs, requestPage, requestPageSize, imagePage, imagePageSize, errorPage]);
+  }, [
+    refreshIntervalMs,
+    requestPage,
+    requestPageSize,
+    imagePage,
+    imagePageSize,
+    asyncTaskPage,
+    asyncTaskPageSize,
+    callbackPage,
+    callbackPageSize,
+    errorPage
+  ]);
 
   async function logout() {
     await fetch(adminPath('/logout'), { method: 'POST' });
@@ -359,6 +487,28 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
     void load({ silent: true, imagePage: 1, imagePageSize: pageSize });
   }
 
+  function changeAsyncTaskPage(page: number) {
+    setAsyncTaskPage(page);
+    void load({ silent: true, asyncTaskPage: page });
+  }
+
+  function changeAsyncTaskPageSize(pageSize: number) {
+    setAsyncTaskPage(1);
+    setAsyncTaskPageSize(pageSize);
+    void load({ silent: true, asyncTaskPage: 1, asyncTaskPageSize: pageSize });
+  }
+
+  function changeCallbackPage(page: number) {
+    setCallbackPage(page);
+    void load({ silent: true, callbackPage: page });
+  }
+
+  function changeCallbackPageSize(pageSize: number) {
+    setCallbackPage(1);
+    setCallbackPageSize(pageSize);
+    void load({ silent: true, callbackPage: 1, callbackPageSize: pageSize });
+  }
+
   function changeErrorPage(page: number) {
     setErrorPage(page);
     void load({ silent: true, errorPage: page });
@@ -369,6 +519,9 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
     ? percent(data.runtime.activeImageProcessing, data.runtime.maxConcurrentImageProcessing)
     : 0;
   const r2UploadError = data?.errors.data.find((item) => item.code === 'r2_upload_failed');
+  const asyncBacklog = data
+    ? data.async.tasks.submitted + data.async.tasks.queued + data.async.tasks.processing + data.async.callbacks.pending + data.async.callbacks.processing
+    : 0;
 
   return (
     <main className="dashboard-shell">
@@ -404,123 +557,118 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
 
       {data ? (
         <>
-          <section className={`maintenance-panel ${data.runtime.draining ? 'draining' : ''}`}>
-            <div className="maintenance-copy">
-              <div className="maintenance-icon">
-                <CirclePause size={20} />
-              </div>
-              <div>
-                <h2>{data.runtime.draining ? '排空模式已开启' : '排空模式未开启'}</h2>
-                <p>
-                  {data.runtime.draining
-                    ? data.runtime.safeToRestart
-                      ? '当前没有活跃生成或处理队列，可以安全重启或升级。'
-                      : '新图片请求已拒绝，已有请求会继续处理，等待队列清空后再重启。'
-                    : '开启后会拒绝新的文生图/图生图请求，已有请求继续完成。'}
-                </p>
-              </div>
-            </div>
+          <nav className="dashboard-tabs" aria-label="监控台视图">
             <button
-              className={data.runtime.draining ? 'ghost-button' : 'danger-button'}
-              disabled={drainUpdating}
-              onClick={() => void setDraining(!data.runtime.draining)}
+              type="button"
+              className={activeTab === 'sync' ? 'active' : ''}
+              onClick={() => setActiveTab('sync')}
+              aria-pressed={activeTab === 'sync'}
             >
-              {drainUpdating ? <Loader2 className="spin" size={17} /> : <CirclePause size={17} />}
-              {data.runtime.draining ? '退出排空模式' : '进入排空模式'}
+              <Activity size={16} />
+              同步接口
             </button>
-          </section>
+            <button
+              type="button"
+              className={activeTab === 'async' ? 'active' : ''}
+              onClick={() => setActiveTab('async')}
+              aria-pressed={activeTab === 'async'}
+            >
+              <Send size={16} />
+              异步任务
+              {asyncBacklog > 0 ? <span>{formatNumber(asyncBacklog)}</span> : null}
+            </button>
+          </nav>
 
-          <AdminUploadPanel onUploaded={() => void load({ silent: true, requestPage: 1, imagePage: 1 })} />
+          {activeTab === 'sync' ? (
+            <>
+              <section className={`maintenance-panel ${data.runtime.draining ? 'draining' : ''}`}>
+                <div className="maintenance-copy">
+                  <div className="maintenance-icon">
+                    <CirclePause size={20} />
+                  </div>
+                  <div>
+                    <h2>{data.runtime.draining ? '排空模式已开启' : '排空模式未开启'}</h2>
+                    <p>
+                      {data.runtime.draining
+                        ? data.runtime.safeToRestart
+                          ? '当前没有活跃生成或处理队列，可以安全重启或升级。'
+                          : '新图片请求已拒绝，已有请求会继续处理，等待队列清空后再重启。'
+                        : '开启后会拒绝新的文生图/图生图请求，已有请求继续完成。'}
+                    </p>
+                  </div>
+                </div>
+                <button
+                  className={data.runtime.draining ? 'ghost-button' : 'danger-button'}
+                  disabled={drainUpdating}
+                  onClick={() => void setDraining(!data.runtime.draining)}
+                >
+                  {drainUpdating ? <Loader2 className="spin" size={17} /> : <CirclePause size={17} />}
+                  {data.runtime.draining ? '退出排空模式' : '进入排空模式'}
+                </button>
+              </section>
 
-          <section className="status-grid">
-            <StatusTile
-              icon={<Server size={19} />}
-              label="服务状态"
-              value={data.runtime.draining ? '排空中' : memoryPercent >= 90 ? '内存高水位' : '运行正常'}
-              tone={data.runtime.draining ? 'warning' : memoryPercent >= 90 ? 'warning' : 'success'}
-              detail={data.runtime.safeToRestart ? '可安全重启' : `RSS ${formatBytes(data.runtime.memory.rssBytes)} / ${formatBytes(data.runtime.memory.maxRssBytes)}`}
-            />
-            <StatusTile
-              icon={<Activity size={19} />}
-              label="生成并发"
-              value={`${data.runtime.activeGenerations}/${data.runtime.maxConcurrentGenerations}`}
-              detail={`等待队列 ${data.runtime.queuedGenerations}`}
-            />
-            <StatusTile
-              icon={<UploadCloud size={19} />}
-              label="处理队列"
-              value={`${data.runtime.activeImageProcessing}/${data.runtime.maxConcurrentImageProcessing}`}
-              tone={processingPercent >= 80 ? 'warning' : 'default'}
-              detail={`等待队列 ${data.runtime.queuedImageProcessing}`}
-            />
-            <StatusTile
-              icon={<UploadCloud size={19} />}
-              label="R2 上传状态"
-              value={r2UploadError ? '存在失败' : '正常'}
-              tone={r2UploadError ? 'warning' : 'success'}
-              detail={r2UploadError ? `失败 ${r2UploadError.count} 次` : '最近无上传错误'}
-            />
-            <StatusTile
-              icon={<MemoryStick size={19} />}
-              label="内存使用"
-              value={`${memoryPercent.toFixed(1)}%`}
-              tone={memoryPercent >= 90 ? 'danger' : memoryPercent >= 75 ? 'warning' : 'default'}
-              detail={`Heap ${formatBytes(data.runtime.memory.heapUsedBytes)} / External ${formatBytes(data.runtime.memory.externalBytes)}`}
-            />
-          </section>
+              <AdminUploadPanel onUploaded={() => void load({ silent: true, requestPage: 1, imagePage: 1 })} />
 
-          <section className="metric-grid">
-            <MetricCard title="总请求" value={formatNumber(data.summary.total)} icon={<BarChart3 size={18} />} />
-            <MetricCard title="成功率" value={`${(data.summary.successRate * 100).toFixed(1)}%`} icon={<CheckCircle2 size={18} />} />
-            <MetricCard title="平均耗时" value={formatMs(data.summary.avgTotalMs)} icon={<Clock3 size={18} />} />
-            <MetricCard title="P95 总耗时" value={formatMs(data.summary.p95TotalMs)} icon={<Clock3 size={18} />} />
-            <MetricCard title="P95 OpenAI" value={formatMs(data.summary.p95OpenaiMs)} icon={<Server size={18} />} />
-            <MetricCard title="P95 上传" value={formatMs(data.summary.p95UploadMs)} icon={<UploadCloud size={18} />} />
-            <MetricCard title="平均图片" value={formatBytes(data.summary.avgImageBytes)} icon={<ImageIcon size={18} />} />
-            <MetricCard title="累计上传" value={formatBytes(data.summary.uploadedBytes)} icon={<Database size={18} />} />
-          </section>
+              <section className="status-grid">
+                <StatusTile
+                  icon={<Server size={19} />}
+                  label="服务状态"
+                  value={data.runtime.draining ? '排空中' : memoryPercent >= 90 ? '内存高水位' : '运行正常'}
+                  tone={data.runtime.draining ? 'warning' : memoryPercent >= 90 ? 'warning' : 'success'}
+                  detail={data.runtime.safeToRestart ? '可安全重启' : `RSS ${formatBytes(data.runtime.memory.rssBytes)} / ${formatBytes(data.runtime.memory.maxRssBytes)}`}
+                />
+                <StatusTile
+                  icon={<Activity size={19} />}
+                  label="生成并发"
+                  value={`${data.runtime.activeGenerations}/${data.runtime.maxConcurrentGenerations}`}
+                  detail={`等待队列 ${data.runtime.queuedGenerations}`}
+                />
+                <StatusTile
+                  icon={<UploadCloud size={19} />}
+                  label="处理队列"
+                  value={`${data.runtime.activeImageProcessing}/${data.runtime.maxConcurrentImageProcessing}`}
+                  tone={processingPercent >= 80 ? 'warning' : 'default'}
+                  detail={`等待队列 ${data.runtime.queuedImageProcessing}`}
+                />
+                <StatusTile
+                  icon={<UploadCloud size={19} />}
+                  label="R2 上传状态"
+                  value={r2UploadError ? '存在失败' : '正常'}
+                  tone={r2UploadError ? 'warning' : 'success'}
+                  detail={r2UploadError ? `失败 ${r2UploadError.count} 次` : '最近无上传错误'}
+                />
+                <StatusTile
+                  icon={<MemoryStick size={19} />}
+                  label="内存使用"
+                  value={`${memoryPercent.toFixed(1)}%`}
+                  tone={memoryPercent >= 90 ? 'danger' : memoryPercent >= 75 ? 'warning' : 'default'}
+                  detail={`Heap ${formatBytes(data.runtime.memory.heapUsedBytes)} / External ${formatBytes(data.runtime.memory.externalBytes)}`}
+                />
+              </section>
 
-          <section className="panel chart-panel">
-            <div className="panel-heading">
-              <div>
-                <h2>最近 1 小时请求趋势</h2>
-                <p>按分钟聚合成功、失败和平均耗时。</p>
-              </div>
-            </div>
-            <div className="chart-wrap">
-              <ResponsiveContainer width="100%" height={260}>
-                <ComposedChart data={data.summary.requestsLastHour}>
-                  <defs>
-                    <linearGradient id="success" x1="0" x2="0" y1="0" y2="1">
-                      <stop offset="5%" stopColor="#10b981" stopOpacity={0.35} />
-                      <stop offset="95%" stopColor="#10b981" stopOpacity={0} />
-                    </linearGradient>
-                    <linearGradient id="failed" x1="0" x2="0" y1="0" y2="1">
-                      <stop offset="5%" stopColor="#ef4444" stopOpacity={0.28} />
-                      <stop offset="95%" stopColor="#ef4444" stopOpacity={0} />
-                    </linearGradient>
-                  </defs>
-                  <CartesianGrid stroke="#e5e7eb" strokeDasharray="4 4" />
-                  <XAxis dataKey="minute" tickFormatter={(value) => String(value).slice(11)} tick={{ fontSize: 12 }} />
-                  <YAxis yAxisId="count" tick={{ fontSize: 12 }} allowDecimals={false} />
-                  <YAxis
-                    yAxisId="duration"
-                    orientation="right"
-                    tick={{ fontSize: 12 }}
-                    tickFormatter={(value) => `${Math.round(Number(value) / 1000)}s`}
-                  />
-                  <Tooltip content={<ChartTooltip />} />
-                  <Area yAxisId="count" type="monotone" dataKey="success" name="成功" stroke="#059669" fill="url(#success)" strokeWidth={2} />
-                  <Area yAxisId="count" type="monotone" dataKey="failed" name="失败" stroke="#dc2626" fill="url(#failed)" strokeWidth={2} />
-                  <Line yAxisId="duration" type="monotone" dataKey="avgTotalMs" name="平均耗时" stroke="#2563eb" strokeWidth={2} dot={false} />
-                </ComposedChart>
-              </ResponsiveContainer>
-            </div>
-          </section>
+              <section className="metric-grid">
+                <MetricCard title="总请求" value={formatNumber(data.summary.total)} icon={<BarChart3 size={18} />} />
+                <MetricCard title="成功率" value={`${(data.summary.successRate * 100).toFixed(1)}%`} icon={<CheckCircle2 size={18} />} />
+                <MetricCard title="平均耗时" value={formatMs(data.summary.avgTotalMs)} icon={<Clock3 size={18} />} />
+                <MetricCard title="P95 总耗时" value={formatMs(data.summary.p95TotalMs)} icon={<Clock3 size={18} />} />
+                <MetricCard title="P95 OpenAI" value={formatMs(data.summary.p95OpenaiMs)} icon={<Server size={18} />} />
+                <MetricCard title="P95 上传" value={formatMs(data.summary.p95UploadMs)} icon={<UploadCloud size={18} />} />
+                <MetricCard title="平均图片" value={formatBytes(data.summary.avgImageBytes)} icon={<ImageIcon size={18} />} />
+                <MetricCard title="累计上传" value={formatBytes(data.summary.uploadedBytes)} icon={<Database size={18} />} />
+              </section>
 
-          <ErrorPanel errors={data.errors} onPageChange={changeErrorPage} />
-          <ImageTable page={data.images} onPageChange={changeImagePage} onPageSizeChange={changeImagePageSize} />
-          <RequestTable page={data.requests} onPageChange={changeRequestPage} onPageSizeChange={changeRequestPageSize} />
+              <RequestTrendChart summary={data.summary} />
+              <ErrorPanel errors={data.errors} onPageChange={changeErrorPage} />
+              <ImageTable page={data.images} onPageChange={changeImagePage} onPageSizeChange={changeImagePageSize} />
+              <RequestTable page={data.requests} onPageChange={changeRequestPage} onPageSizeChange={changeRequestPageSize} />
+            </>
+          ) : (
+            <>
+              <AsyncOverviewPanel overview={data.async} />
+              <AsyncTaskTable page={data.asyncTasks} enabled={data.async.enabled} onPageChange={changeAsyncTaskPage} onPageSizeChange={changeAsyncTaskPageSize} />
+              <CallbackTable page={data.callbacks} enabled={data.async.enabled} onPageChange={changeCallbackPage} onPageSizeChange={changeCallbackPageSize} />
+            </>
+          )}
         </>
       ) : (
         <div className="panel empty-panel">
@@ -680,6 +828,39 @@ function MetricCard({ title, value, icon }: { title: string; value: string; icon
   );
 }
 
+function AsyncStatusPill({ status }: { status: AsyncTaskRecord['status'] }) {
+  const statusMap: Record<AsyncTaskRecord['status'], { label: string; className: string }> = {
+    submitted: { label: '已提交', className: 'neutral' },
+    queued: { label: '排队中', className: 'warning' },
+    processing: { label: '处理中', className: 'warning' },
+    succeeded: { label: '成功', className: 'ok' },
+    failed: { label: '失败', className: 'bad' }
+  };
+  const item = statusMap[status];
+  return (
+    <span className={`status-pill ${item.className}`}>
+      {status === 'succeeded' ? <CheckCircle2 size={13} /> : status === 'failed' ? <XCircle size={13} /> : null}
+      {item.label}
+    </span>
+  );
+}
+
+function CallbackStatusPill({ status }: { status: CallbackEventRecord['status'] }) {
+  const statusMap: Record<CallbackEventRecord['status'], { label: string; className: string }> = {
+    pending: { label: '待投递', className: 'warning' },
+    processing: { label: '投递中', className: 'warning' },
+    delivered: { label: '已投递', className: 'ok' },
+    failed: { label: '失败', className: 'bad' }
+  };
+  const item = statusMap[status];
+  return (
+    <span className={`status-pill ${item.className}`}>
+      {status === 'delivered' ? <CheckCircle2 size={13} /> : status === 'failed' ? <XCircle size={13} /> : null}
+      {item.label}
+    </span>
+  );
+}
+
 function ChartTooltip({ active, payload, label }: any) {
   if (!active || !payload?.length) {
     return null;
@@ -693,6 +874,100 @@ function ChartTooltip({ active, payload, label }: any) {
         </span>
       ))}
     </div>
+  );
+}
+
+function RequestTrendChart({ summary }: { summary: Summary }) {
+  return (
+    <section className="panel chart-panel">
+      <div className="panel-heading">
+        <div>
+          <h2>最近 1 小时请求趋势</h2>
+          <p>按分钟聚合成功、失败和平均耗时。</p>
+        </div>
+      </div>
+      <div className="chart-wrap">
+        <ResponsiveContainer width="100%" height={260}>
+          <ComposedChart data={summary.requestsLastHour}>
+            <defs>
+              <linearGradient id="success" x1="0" x2="0" y1="0" y2="1">
+                <stop offset="5%" stopColor="#10b981" stopOpacity={0.35} />
+                <stop offset="95%" stopColor="#10b981" stopOpacity={0} />
+              </linearGradient>
+              <linearGradient id="failed" x1="0" x2="0" y1="0" y2="1">
+                <stop offset="5%" stopColor="#ef4444" stopOpacity={0.28} />
+                <stop offset="95%" stopColor="#ef4444" stopOpacity={0} />
+              </linearGradient>
+            </defs>
+            <CartesianGrid stroke="#e5e7eb" strokeDasharray="4 4" />
+            <XAxis dataKey="minute" tickFormatter={(value) => String(value).slice(11)} tick={{ fontSize: 12 }} />
+            <YAxis yAxisId="count" tick={{ fontSize: 12 }} allowDecimals={false} />
+            <YAxis
+              yAxisId="duration"
+              orientation="right"
+              tick={{ fontSize: 12 }}
+              tickFormatter={(value) => `${Math.round(Number(value) / 1000)}s`}
+            />
+            <Tooltip content={<ChartTooltip />} />
+            <Area yAxisId="count" type="monotone" dataKey="success" name="成功" stroke="#059669" fill="url(#success)" strokeWidth={2} />
+            <Area yAxisId="count" type="monotone" dataKey="failed" name="失败" stroke="#dc2626" fill="url(#failed)" strokeWidth={2} />
+            <Line yAxisId="duration" type="monotone" dataKey="avgTotalMs" name="平均耗时" stroke="#2563eb" strokeWidth={2} dot={false} />
+          </ComposedChart>
+        </ResponsiveContainer>
+      </div>
+    </section>
+  );
+}
+
+function AsyncOverviewPanel({ overview }: { overview: AsyncOverview }) {
+  const queue = overview.queue;
+  const taskBacklog = overview.tasks.submitted + overview.tasks.queued + overview.tasks.processing;
+  const callbackBacklog = overview.callbacks.pending + overview.callbacks.processing;
+
+  return (
+    <section className="panel async-panel">
+      <div className="panel-heading">
+        <div>
+          <h2>异步任务运行态</h2>
+          <p>{overview.enabled ? '展示 PostgreSQL 任务事实库、Redis 队列和回调投递积压。' : '未配置 PostgreSQL 或 Redis，异步任务管理未启用。'}</p>
+        </div>
+        <span className={`status-pill ${overview.enabled ? 'ok' : 'neutral'}`}>
+          {overview.enabled ? <CheckCircle2 size={13} /> : <CirclePause size={13} />}
+          {overview.enabled ? '已启用' : '未启用'}
+        </span>
+      </div>
+
+      <div className="async-status-grid">
+        <StatusTile
+          icon={<Activity size={19} />}
+          label="任务积压"
+          value={formatNumber(taskBacklog)}
+          tone={taskBacklog > 0 ? 'warning' : 'success'}
+          detail={`排队 ${overview.tasks.queued} / 处理中 ${overview.tasks.processing}`}
+        />
+        <StatusTile
+          icon={<CheckCircle2 size={19} />}
+          label="任务终态"
+          value={`${formatNumber(overview.tasks.succeeded)} / ${formatNumber(overview.tasks.failed)}`}
+          tone={overview.tasks.failed > 0 ? 'warning' : 'default'}
+          detail={`成功 / 失败，总计 ${formatNumber(overview.tasks.total)}`}
+        />
+        <StatusTile
+          icon={<Send size={19} />}
+          label="回调积压"
+          value={formatNumber(callbackBacklog)}
+          tone={callbackBacklog > 0 ? 'warning' : 'success'}
+          detail={`待投递 ${overview.callbacks.pending} / 投递中 ${overview.callbacks.processing}`}
+        />
+        <StatusTile
+          icon={<Database size={19} />}
+          label="Redis 队列"
+          value={queue ? formatNumber(queue.waiting + queue.active + queue.delayed) : '-'}
+          tone={queue && queue.failed > 0 ? 'warning' : 'default'}
+          detail={queue ? `等待 ${queue.waiting} / 活跃 ${queue.active} / 失败 ${queue.failed}` : '未连接队列'}
+        />
+      </div>
+    </section>
   );
 }
 
@@ -739,6 +1014,147 @@ function ErrorPanel({ errors, onPageChange }: {
           </div>
         </div>
       ) : null}
+    </section>
+  );
+}
+
+function AsyncTaskTable({ page, enabled, onPageChange, onPageSizeChange }: {
+  page: PaginatedAsyncTasks;
+  enabled: boolean;
+  onPageChange: (page: number) => void;
+  onPageSizeChange: (pageSize: number) => void;
+}) {
+  return (
+    <section className="panel table-panel">
+      <div className="panel-heading">
+        <div>
+          <h2>异步图片任务</h2>
+          <p>只展示执行状态和排障字段，不展示 prompt。</p>
+        </div>
+      </div>
+      <div className="table-scroll">
+        <table className="async-task-table">
+          <thead>
+            <tr>
+              <th>创建时间</th>
+              <th>状态</th>
+              <th>new-api 任务</th>
+              <th>内部任务</th>
+              <th>平台/模型</th>
+              <th>类型</th>
+              <th>参数</th>
+              <th>尝试</th>
+              <th>图片</th>
+              <th>错误</th>
+              <th>更新时间</th>
+              <th>URL</th>
+            </tr>
+          </thead>
+          <tbody>
+            {!enabled ? (
+              <tr>
+                <td colSpan={12} className="table-empty">异步任务管理未启用</td>
+              </tr>
+            ) : page.data.length === 0 ? (
+              <tr>
+                <td colSpan={12} className="table-empty">暂无异步任务</td>
+              </tr>
+            ) : page.data.map((task) => (
+              <tr key={task.provider_task_id}>
+                <td>{formatDate(task.created_at)}</td>
+                <td><AsyncStatusPill status={task.status} /></td>
+                <td className="id-cell">{task.client_task_id}</td>
+                <td className="id-cell">{task.provider_task_id}</td>
+                <td>{task.provider} / {task.model}</td>
+                <td>{asyncOperationLabel(task.operation)}</td>
+                <td className="params-cell">
+                  <span className="single-line">{formatAsyncTaskParams(task)}</span>
+                </td>
+                <td>{task.attempts}</td>
+                <td>{task.image_count}</td>
+                <td className="error-message-cell">{task.error_code ? formatTaskError(task) : '-'}</td>
+                <td>{formatDate(task.updated_at)}</td>
+                <td>
+                  {task.first_image_url ? (
+                    <div className="table-actions">
+                      <a className="icon-button" href={task.first_image_url} target="_blank" rel="noreferrer" title="打开图片 URL" aria-label="打开异步任务图片 URL">
+                        <LinkIcon size={14} />
+                      </a>
+                      <button className="icon-button" onClick={() => void navigator.clipboard.writeText(task.first_image_url ?? '')} title="复制 URL" aria-label="复制异步任务图片 URL">
+                        <Copy size={14} />
+                      </button>
+                    </div>
+                  ) : '-'}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <Pagination page={page} onPageChange={onPageChange} onPageSizeChange={onPageSizeChange} />
+    </section>
+  );
+}
+
+function CallbackTable({ page, enabled, onPageChange, onPageSizeChange }: {
+  page: PaginatedCallbacks;
+  enabled: boolean;
+  onPageChange: (page: number) => void;
+  onPageSizeChange: (pageSize: number) => void;
+}) {
+  return (
+    <section className="panel table-panel">
+      <div className="panel-heading">
+        <div>
+          <h2>回调投递</h2>
+          <p>按回调事件查看投递状态、密钥标识和下一次重试时间。</p>
+        </div>
+      </div>
+      <div className="table-scroll table-scroll-compact">
+        <table className="callback-table">
+          <thead>
+            <tr>
+              <th>创建时间</th>
+              <th>状态</th>
+              <th>事件 ID</th>
+              <th>new-api 任务</th>
+              <th>内部任务</th>
+              <th>密钥标识</th>
+              <th>尝试</th>
+              <th>下一次投递</th>
+              <th>已投递时间</th>
+              <th>回调地址</th>
+            </tr>
+          </thead>
+          <tbody>
+            {!enabled ? (
+              <tr>
+                <td colSpan={10} className="table-empty">异步回调管理未启用</td>
+              </tr>
+            ) : page.data.length === 0 ? (
+              <tr>
+                <td colSpan={10} className="table-empty">暂无回调事件</td>
+              </tr>
+            ) : page.data.map((event) => (
+              <tr key={event.event_id}>
+                <td>{formatDate(event.created_at)}</td>
+                <td><CallbackStatusPill status={event.status} /></td>
+                <td className="id-cell">{event.event_id}</td>
+                <td className="id-cell">{event.client_task_id}</td>
+                <td className="id-cell">{event.provider_task_id}</td>
+                <td>{event.secret_id ?? '-'}</td>
+                <td>{event.attempts}</td>
+                <td>{formatDate(event.next_attempt_at)}</td>
+                <td>{event.delivered_at ? formatDate(event.delivered_at) : '-'}</td>
+                <td className="url-cell">
+                  <span className="single-line">{event.batch_callback_url || event.callback_url}</span>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <Pagination page={page} onPageChange={onPageChange} onPageSizeChange={onPageSizeChange} />
     </section>
   );
 }
@@ -1040,7 +1456,7 @@ function JsonPanel({ title, value }: { title: string; value: Record<string, unkn
 }
 
 function Pagination({ page, onPageChange, onPageSizeChange }: {
-  page: PaginatedRecords;
+  page: PaginatedRecords | PaginatedAsyncTasks | PaginatedCallbacks;
   onPageChange: (page: number) => void;
   onPageSizeChange: (pageSize: number) => void;
 }) {
@@ -1177,6 +1593,25 @@ function formatResponseParamSummary(params: Record<string, unknown> | undefined)
   return parts.length > 0 ? parts.join(' | ') : '-';
 }
 
+function formatAsyncTaskParams(task: AsyncTaskRecord): string {
+  const parameterSummary = formatParamParts(task.parameters, ['size', 'quality', 'n', 'output_format', 'output_compression']);
+  const channelId = getScalarParam(task.metadata, 'channel_id');
+  if (channelId && parameterSummary !== '-') {
+    return `${parameterSummary} | channel:${channelId}`;
+  }
+  return channelId ? `channel:${channelId}` : parameterSummary;
+}
+
+function formatTaskError(task: AsyncTaskRecord): string {
+  const code = task.error_code ?? 'unknown_error';
+  const message = task.error_message?.trim();
+  if (!message) {
+    return code;
+  }
+  const brief = message.length > 48 ? `${message.slice(0, 47)}...` : message;
+  return `${code} · ${brief}`;
+}
+
 function formatErrorSummary(request: RequestRecord): string {
   const message = request.errorMessage?.trim();
   if (!message) {
@@ -1236,6 +1671,10 @@ function operationLabel(operation: RequestRecord['operation']): string {
   if (operation === 'manual_upload') {
     return '本地上传';
   }
+  return operation === 'edit' ? '图生图' : '文生图';
+}
+
+function asyncOperationLabel(operation: AsyncTaskRecord['operation']): string {
   return operation === 'edit' ? '图生图' : '文生图';
 }
 

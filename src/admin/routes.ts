@@ -7,6 +7,9 @@ import { adminCookieName, createSessionToken, sessionCookieOptions, verifyPasswo
 import type { AdminStore } from './store.js';
 import type { AdminConfig, AdminRuntimeStats } from './types.js';
 import { AppError, sendAppError } from '../errors.js';
+import type { AsyncTaskStore } from '../async/store.js';
+import type { Queue } from 'bullmq';
+import type { TaskQueuePayload } from '../async/types.js';
 
 interface AdminRoutesOptions {
   config: AdminConfig;
@@ -14,6 +17,8 @@ interface AdminRoutesOptions {
   getRuntimeStats: () => AdminRuntimeStats;
   maxUploadBytes: number;
   uploadImage?: AdminUploadHandler;
+  asyncTaskStore?: AsyncTaskStore;
+  taskQueue?: Queue<TaskQueuePayload>;
 }
 
 interface LoginBody {
@@ -196,6 +201,56 @@ export function registerAdminRoutes(app: FastifyInstance, options: AdminRoutesOp
     return options.store.getErrorsPage(page, pageSize, 24);
   });
 
+  app.get(route('/api/async/summary'), {
+    preHandler: async (request, reply) => requireAdmin(options.config, request, reply)
+  }, async (_request, reply) => {
+    if (!options.asyncTaskStore) {
+      return reply.send({
+        enabled: false,
+        tasks: emptyTaskSummary(),
+        callbacks: emptyCallbackSummary(),
+        queue: null
+      });
+    }
+
+    const [tasks, callbacks, queue] = await Promise.all([
+      options.asyncTaskStore.getAdminTaskSummary(),
+      options.asyncTaskStore.getAdminCallbackSummary(),
+      getQueueStats(options.taskQueue)
+    ]);
+
+    return {
+      enabled: true,
+      tasks,
+      callbacks,
+      queue
+    };
+  });
+
+  app.get<{ Querystring: PageQuery }>(route('/api/async/tasks'), {
+    preHandler: async (request, reply) => requireAdmin(options.config, request, reply)
+  }, async (request, reply) => {
+    if (!options.asyncTaskStore) {
+      return reply.send(emptyPage(parseBoundedInt(request.query.page, 1, 1, Number.MAX_SAFE_INTEGER), parseBoundedInt(request.query.page_size, 20, 1, 100)));
+    }
+
+    const page = parseBoundedInt(request.query.page, 1, 1, Number.MAX_SAFE_INTEGER);
+    const pageSize = parseBoundedInt(request.query.page_size, 20, 1, 100);
+    return options.asyncTaskStore.getAdminTasksPage(page, pageSize);
+  });
+
+  app.get<{ Querystring: PageQuery }>(route('/api/async/callbacks'), {
+    preHandler: async (request, reply) => requireAdmin(options.config, request, reply)
+  }, async (request, reply) => {
+    if (!options.asyncTaskStore) {
+      return reply.send(emptyPage(parseBoundedInt(request.query.page, 1, 1, Number.MAX_SAFE_INTEGER), parseBoundedInt(request.query.page_size, 20, 1, 100)));
+    }
+
+    const page = parseBoundedInt(request.query.page, 1, 1, Number.MAX_SAFE_INTEGER);
+    const pageSize = parseBoundedInt(request.query.page_size, 20, 1, 100);
+    return options.asyncTaskStore.getAdminCallbackEventsPage(page, pageSize);
+  });
+
   app.get(route('/login'), async (_request, reply) => sendAdminShell(reply, adminDist));
   app.get(basePath, {
     preHandler: async (request, reply) => requireAdmin(options.config, request, reply)
@@ -203,6 +258,52 @@ export function registerAdminRoutes(app: FastifyInstance, options: AdminRoutesOp
   app.get(route('/*'), {
     preHandler: async (request, reply) => requireAdmin(options.config, request, reply)
   }, async (_request, reply) => sendAdminShell(reply, adminDist));
+}
+
+async function getQueueStats(queue: Queue<TaskQueuePayload> | undefined): Promise<Record<string, number> | null> {
+  if (!queue) {
+    return null;
+  }
+  const counts = await queue.getJobCounts('waiting', 'active', 'delayed', 'completed', 'failed', 'paused');
+  return {
+    waiting: counts.waiting ?? 0,
+    active: counts.active ?? 0,
+    delayed: counts.delayed ?? 0,
+    completed: counts.completed ?? 0,
+    failed: counts.failed ?? 0,
+    paused: counts.paused ?? 0
+  };
+}
+
+function emptyTaskSummary() {
+  return {
+    total: 0,
+    submitted: 0,
+    queued: 0,
+    processing: 0,
+    succeeded: 0,
+    failed: 0
+  };
+}
+
+function emptyCallbackSummary() {
+  return {
+    total: 0,
+    pending: 0,
+    processing: 0,
+    delivered: 0,
+    failed: 0
+  };
+}
+
+function emptyPage(page: number, pageSize: number) {
+  return {
+    data: [],
+    page,
+    pageSize,
+    total: 0,
+    totalPages: 1
+  };
 }
 
 function isMultipartFileTooLargeError(error: unknown): boolean {

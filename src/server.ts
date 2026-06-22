@@ -5,12 +5,16 @@ import { Agent, fetch as undiciFetch } from 'undici';
 import { registerAdminRoutes, type AdminUploadFile, type AdminUploadResult } from './admin/routes.js';
 import { AdminStore } from './admin/store.js';
 import type { AdminRuntimeStats, ImageRequestRecord } from './admin/types.js';
+import { registerAsyncTaskRoutes } from './async/routes.js';
+import { AsyncTaskStore } from './async/store.js';
+import { createQueueClients, closeQueueClients, type QueueClients } from './async/queue.js';
 import type { AppConfig } from './config.js';
 import { AppError, openAIError, sendAppError } from './errors.js';
 import { buildImageKey, decodeBase64Image, normalizeImageRequestBody, readImageMetadata, type ImageMetadata, type ImageRequestBody } from './image.js';
 import { pickImageStrategy, type ImageModelStrategy, type ImageSource, type ImageSourceType } from './image-strategy.js';
 import { ActiveRequestLimiter } from './limiter.js';
 import { createR2Client, uploadImageToR2 } from './r2.js';
+import { uploadWithRetry } from './upload-retry.js';
 
 interface UpstreamImageItem {
   b64_json?: string;
@@ -76,6 +80,8 @@ interface ServerDeps {
   uploadImageToR2?: UploadImageToR2;
   uploadPngToR2?: UploadImageToR2;
   adminStore?: AdminStore;
+  asyncTaskStore?: AsyncTaskStore;
+  queueClients?: QueueClients;
 }
 
 function runtimeStats(
@@ -338,15 +344,6 @@ function upstreamUrl(config: AppConfig, operation: ImageOperation): string {
 
 function msSince(startedAt: number): number {
   return Math.round(performance.now() - startedAt);
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function retryDelayMs(config: AppConfig, retryIndex: number): number {
-  const delay = config.upload.retryBaseDelayMs * 2 ** retryIndex;
-  return Math.min(config.upload.retryMaxDelayMs, delay);
 }
 
 function formatBeijingTime(unixSeconds: number): string {
@@ -751,57 +748,6 @@ function sendUpstreamError(reply: FastifyReply, error: unknown): FastifyReply | 
   return reply.status(error.statusCode).send(openAIError(error.message, error.type, error.code));
 }
 
-async function uploadWithRetry({
-  upload,
-  request,
-  r2Client,
-  config,
-  key,
-  buffer,
-  contentType
-}: {
-  upload: UploadImageToR2;
-  request: FastifyRequest;
-  r2Client: ReturnType<typeof createR2Client>;
-  config: AppConfig;
-  key: string;
-  buffer: Buffer;
-  contentType: string;
-}): Promise<string> {
-  let lastError: unknown;
-  const maxAttempts = config.upload.maxRetries + 1;
-
-  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    try {
-      return await upload({
-        client: r2Client,
-        config: config.r2,
-        key,
-        buffer,
-        contentType
-      });
-    } catch (error) {
-      lastError = error;
-      if (attempt >= maxAttempts) {
-        break;
-      }
-
-      const delayMs = retryDelayMs(config, attempt - 1);
-      request.log.warn({
-        request_id: request.id,
-        attempt,
-        next_attempt: attempt + 1,
-        max_attempts: maxAttempts,
-        retry_delay_ms: delayMs,
-        r2: r2ErrorDetails(error)
-      }, 'r2 upload attempt failed, retrying');
-      await sleep(delayMs);
-    }
-  }
-
-  throw lastError;
-}
-
 export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyInstance {
   const r2Client = createR2Client(config.r2);
   const upstreamDispatcher = new Agent({
@@ -810,6 +756,8 @@ export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyIn
   });
   const upload = deps.uploadImageToR2 ?? deps.uploadPngToR2 ?? uploadImageToR2;
   const adminStore = deps.adminStore ?? new AdminStore(config.admin.dbPath);
+  const asyncStore = deps.asyncTaskStore ?? (config.asyncTasks.postgresUrl ? new AsyncTaskStore(config.asyncTasks.postgresUrl) : undefined);
+  const queueClients = deps.queueClients ?? (config.asyncTasks.redisUrl ? createQueueClients(config) : undefined);
   const generationLimiter = new ActiveRequestLimiter(config.limits.maxConcurrentGenerations);
   const imageProcessingLimiter = new ActiveRequestLimiter(config.limits.maxConcurrentImageProcessing);
   const app = Fastify({
@@ -839,6 +787,12 @@ export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyIn
   app.addHook('onClose', async () => {
     clearInterval(cleanupInterval);
     await upstreamDispatcher.close();
+    if (!deps.queueClients && queueClients) {
+      await closeQueueClients(queueClients);
+    }
+    if (!deps.asyncTaskStore && asyncStore) {
+      await asyncStore.close();
+    }
     adminStore.close();
   });
 
@@ -877,8 +831,18 @@ export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyIn
     store: adminStore,
     getRuntimeStats: () => runtimeStats(config, generationLimiter, imageProcessingLimiter, adminStore),
     maxUploadBytes: config.bodyLimitBytes,
-    uploadImage: (file, request) => handleAdminImageUpload(file, request)
+    uploadImage: (file, request) => handleAdminImageUpload(file, request),
+    asyncTaskStore: asyncStore,
+    taskQueue: queueClients?.taskQueue
   });
+
+  if (asyncStore && queueClients) {
+    registerAsyncTaskRoutes(app, {
+      config,
+      store: asyncStore,
+      taskQueue: queueClients.taskQueue
+    });
+  }
 
   app.get('/healthz', async () => ({
     ok: true,

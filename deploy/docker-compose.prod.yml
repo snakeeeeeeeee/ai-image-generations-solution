@@ -1,0 +1,83 @@
+name: image-handle-prod
+
+x-app-image: &app-image ${IMAGE_HANDLE_IMAGE:-image-handle:latest}
+
+services:
+  image-handle-postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-image_handle}
+      POSTGRES_USER: ${POSTGRES_USER:-image_handle}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-image_handle}
+    ports:
+      - "${POSTGRES_BIND_ADDR:-0.0.0.0}:${POSTGRES_HOST_PORT:-5432}:5432"
+    volumes:
+      - image-handle-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-image_handle} -d $${POSTGRES_DB:-image_handle}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  image-handle-redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command:
+      - sh
+      - -c
+      - |
+        if [ -n "$$REDIS_PASSWORD" ]; then
+          exec redis-server --appendonly yes --requirepass "$$REDIS_PASSWORD"
+        fi
+        exec redis-server --appendonly yes
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+    ports:
+      - "${REDIS_BIND_ADDR:-0.0.0.0}:${REDIS_HOST_PORT:-6379}:6379"
+    volumes:
+      - image-handle-redis-data:/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - |
+          if [ -n "$${REDIS_PASSWORD}" ]; then
+            redis-cli -a "$${REDIS_PASSWORD}" ping
+          else
+            redis-cli ping
+          fi
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  image-api:
+    image: *app-image
+    restart: unless-stopped
+    env_file:
+      - ${IMAGE_HANDLE_ENV_FILE:-./.env}
+    environment:
+      IMAGE_HANDLE_ROLE: api
+      HOST: ${HOST:-0.0.0.0}
+      PORT: ${PORT:-8787}
+    ports:
+      - "${IMAGE_API_HOST_PORT:-8787}:${PORT:-8787}"
+
+  image-worker:
+    image: *app-image
+    restart: unless-stopped
+    env_file:
+      - ${IMAGE_HANDLE_ENV_FILE:-./.env}
+    environment:
+      IMAGE_HANDLE_ROLE: worker
+
+  image-notifier:
+    image: *app-image
+    restart: unless-stopped
+    env_file:
+      - ${IMAGE_HANDLE_ENV_FILE:-./.env}
+    environment:
+      IMAGE_HANDLE_ROLE: notifier
+
+volumes:
+  image-handle-postgres-data:
+  image-handle-redis-data:

@@ -23,6 +23,7 @@ function buildTestConfig(baseUrl: string, overrides: DeepPartial<AppConfig> = {}
     host: '127.0.0.1',
     logLevel: 'silent',
     bodyLimitBytes: 100 * 1024 * 1024,
+    role: 'api',
     limits: {
       maxConcurrentGenerations: 1000,
       maxConcurrentImageProcessing: 50,
@@ -54,7 +55,8 @@ function buildTestConfig(baseUrl: string, overrides: DeepPartial<AppConfig> = {}
       bucket: 'test-image-bucket',
       publicUrl: 'https://img.example.com',
       keyPrefix: 'images',
-      cacheControl: 'public, max-age=86400'
+      cacheControl: 'public, max-age=86400',
+      forcePathStyle: false
     },
     admin: {
       basePath: '/image-wrapper/admin',
@@ -64,6 +66,21 @@ function buildTestConfig(baseUrl: string, overrides: DeepPartial<AppConfig> = {}
       retentionDays: 7,
       recentLimit: 1000,
       cookieSecure: false
+    },
+    asyncTasks: {
+      postgresUrl: '',
+      redisUrl: '',
+      providerApiKeys: [],
+      workerConcurrency: 20,
+      imageProcessingConcurrency: 10,
+      globalRateLimitIpm: 250,
+      providerRateLimitConfig: {},
+      callbackBatchSize: 50,
+      callbackFlushMs: 2000,
+      callbackMaxRetryAgeHours: 24,
+      callbackDefaultSecret: 'test-callback-secret',
+      callbackSecrets: {},
+      taskStaleProcessingTimeoutSeconds: 1800
     }
   };
 
@@ -97,6 +114,21 @@ function buildTestConfig(baseUrl: string, overrides: DeepPartial<AppConfig> = {}
     admin: {
       ...base.admin,
       ...overrides.admin
+    },
+    asyncTasks: {
+      postgresUrl: overrides.asyncTasks?.postgresUrl ?? base.asyncTasks.postgresUrl,
+      redisUrl: overrides.asyncTasks?.redisUrl ?? base.asyncTasks.redisUrl,
+      providerApiKeys: overrides.asyncTasks?.providerApiKeys?.filter((item): item is string => typeof item === 'string') ?? base.asyncTasks.providerApiKeys,
+      workerConcurrency: overrides.asyncTasks?.workerConcurrency ?? base.asyncTasks.workerConcurrency,
+      imageProcessingConcurrency: overrides.asyncTasks?.imageProcessingConcurrency ?? base.asyncTasks.imageProcessingConcurrency,
+      globalRateLimitIpm: overrides.asyncTasks?.globalRateLimitIpm ?? base.asyncTasks.globalRateLimitIpm,
+      providerRateLimitConfig: base.asyncTasks.providerRateLimitConfig,
+      callbackBatchSize: overrides.asyncTasks?.callbackBatchSize ?? base.asyncTasks.callbackBatchSize,
+      callbackFlushMs: overrides.asyncTasks?.callbackFlushMs ?? base.asyncTasks.callbackFlushMs,
+      callbackMaxRetryAgeHours: overrides.asyncTasks?.callbackMaxRetryAgeHours ?? base.asyncTasks.callbackMaxRetryAgeHours,
+      callbackDefaultSecret: overrides.asyncTasks?.callbackDefaultSecret ?? base.asyncTasks.callbackDefaultSecret,
+      callbackSecrets: base.asyncTasks.callbackSecrets,
+      taskStaleProcessingTimeoutSeconds: overrides.asyncTasks?.taskStaleProcessingTimeoutSeconds ?? base.asyncTasks.taskStaleProcessingTimeoutSeconds
     }
   };
 }

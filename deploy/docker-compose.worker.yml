@@ -1,0 +1,20 @@
+name: image-handle-worker
+
+x-app-image: &app-image ${IMAGE_HANDLE_IMAGE:-image-handle:latest}
+
+services:
+  image-worker:
+    image: *app-image
+    restart: unless-stopped
+    env_file:
+      - ${IMAGE_HANDLE_ENV_FILE:-./.env}
+    environment:
+      IMAGE_HANDLE_ROLE: worker
+
+  image-notifier:
+    image: *app-image
+    restart: unless-stopped
+    env_file:
+      - ${IMAGE_HANDLE_ENV_FILE:-./.env}
+    environment:
+      IMAGE_HANDLE_ROLE: notifier

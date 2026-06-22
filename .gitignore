@@ -3,6 +3,10 @@ dist/
 .env
 .env.*
 !.env.example
+!deploy/.env.example
+!deploy/.env.dev.example
+!deploy/.env.prod.example
+deploy/.env
 .idea/
 npm-debug.log*
 coverage/
