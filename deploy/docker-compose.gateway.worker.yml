@@ -1,0 +1,15 @@
+services:
+  image-worker:
+    networks:
+      - default
+      - image-handle-gateway
+
+  image-notifier:
+    networks:
+      - default
+      - image-handle-gateway
+
+networks:
+  image-handle-gateway:
+    external: true
+    name: ${IMAGE_HANDLE_GATEWAY_NETWORK}

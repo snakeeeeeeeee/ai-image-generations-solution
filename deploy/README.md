@@ -115,6 +115,15 @@ cp .env.prod.example .env
 ./image-handle.sh --env prod start full
 ```
 
+如果 new-api 已经接入一个外部 Docker 网络，例如 `ai-gateway`，推荐让 image-handle 也加入这个网络，然后直接用 new-api 容器名访问：
+
+```env
+IMAGE_HANDLE_GATEWAY_NETWORK=ai-gateway
+NEW_API_BASE_URL=http://newapi-master:3000
+```
+
+脚本检测到 `IMAGE_HANDLE_GATEWAY_NETWORK` 不为空时，会自动追加 `docker-compose.gateway.yml`。这样不需要改 new-api 的 `127.0.0.1:3000->3000` 端口绑定，也不依赖 Docker 网关 IP。
+
 主节点自带 PG/Redis 时，`.env` 里的连接串保持容器内服务名：
 
 ```env
@@ -182,6 +191,13 @@ cd deploy
 cp .env.prod.example .env
 # POSTGRES_URL 和 REDIS_URL 必须指向同一套生产共享服务。
 ./image-handle.sh --env worker start all
+```
+
+如果新增处理节点也需要访问同一个 Docker 外部网络里的 new-api，可同样配置：
+
+```env
+IMAGE_HANDLE_GATEWAY_NETWORK=ai-gateway
+NEW_API_BASE_URL=http://newapi-master:3000
 ```
 
 如果共享 PostgreSQL/Redis 是由主节点 `start full` 启动的，新增机器上的 `.env` 不要使用容器服务名，要改成主节点内网 IP：

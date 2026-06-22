@@ -88,7 +88,17 @@ compose_file() {
 }
 
 compose() {
-  IMAGE_HANDLE_ENV_FILE="${ENV_FILE}" docker compose --env-file "${ENV_FILE}" -f "$(compose_file)" "$@"
+  local args=(--env-file "${ENV_FILE}" -f "$(compose_file)")
+  local gateway_network
+  gateway_network="$(env_value IMAGE_HANDLE_GATEWAY_NETWORK)"
+  if [[ -n "${gateway_network}" ]]; then
+    if [[ "${ENVIRONMENT}" == "worker" ]]; then
+      args+=(-f "${SCRIPT_DIR}/docker-compose.gateway.worker.yml")
+    else
+      args+=(-f "${SCRIPT_DIR}/docker-compose.gateway.yml")
+    fi
+  fi
+  IMAGE_HANDLE_ENV_FILE="${ENV_FILE}" docker compose "${args[@]}" "$@"
 }
 
 env_value() {

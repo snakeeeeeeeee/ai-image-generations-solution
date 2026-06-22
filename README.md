@@ -160,6 +160,13 @@ cp .env.prod.example .env
 ./image-handle.sh --env prod start full
 ```
 
+如果 new-api 已经在外部 Docker 网络中，例如 `ai-gateway`，image-handle 可通过同一网络直接访问 new-api 容器：
+
+```env
+IMAGE_HANDLE_GATEWAY_NETWORK=ai-gateway
+NEW_API_BASE_URL=http://newapi-master:3000
+```
+
 如果 PostgreSQL/Redis 已经部署在独立机器或云服务上，只启动业务服务：
 
 ```bash
