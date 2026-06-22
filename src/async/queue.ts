@@ -39,11 +39,12 @@ export async function enqueueImageTask(
   providerTaskId: string,
   options: JobsOptions = {}
 ): Promise<void> {
+  const { jobId = providerTaskId, ...restOptions } = options;
   await queue.add(
     'image-task',
     { provider_task_id: providerTaskId },
     {
-      jobId: providerTaskId,
+      jobId,
       attempts: 1,
       removeOnComplete: {
         age: 3600,
@@ -53,7 +54,7 @@ export async function enqueueImageTask(
         age: 86400,
         count: 10000
       },
-      ...options
+      ...restOptions
     }
   );
 }

@@ -99,7 +99,6 @@ curl http://127.0.0.1:8787/v1/image/tasks \
   -d '{
     "request_id": "req_local_1",
     "client_task_id": "task_local_1",
-    "provider": "openai",
     "model": "gpt-image-2",
     "operation": "generation",
     "input": {
@@ -109,6 +108,11 @@ curl http://127.0.0.1:8787/v1/image/tasks \
       "size": "1024x1024",
       "n": 1,
       "output_format": "png"
+    },
+    "executor": {
+      "type": "new_api_internal",
+      "execute_url": "http://mock-new-api:3999/api/internal/image/tasks/task_local_1/execute",
+      "secret_id": "image_handle_1"
     },
     "callback": {
       "url": "http://mock-new-api:3999/api/task/callback/external-image/task_local_1",
@@ -130,7 +134,6 @@ curl http://127.0.0.1:8787/v1/image/tasks \
   -d '{
     "request_id": "req_edit_1",
     "client_task_id": "task_edit_1",
-    "provider": "openai",
     "model": "gpt-image-2",
     "operation": "edit",
     "input": {
@@ -142,6 +145,11 @@ curl http://127.0.0.1:8787/v1/image/tasks \
       "size": "1024x1024",
       "n": 1,
       "output_format": "png"
+    },
+    "executor": {
+      "type": "new_api_internal",
+      "execute_url": "http://mock-new-api:3999/api/internal/image/tasks/task_edit_1/execute",
+      "secret_id": "image_handle_1"
     }
   }'
 ```
@@ -162,7 +170,7 @@ curl http://127.0.0.1:8787/v1/image/tasks/query \
   -d '{"task_ids":["imgtask_xxx"]}'
 ```
 
-异步任务的事实库是 PostgreSQL。Redis 用于 BullMQ 队列、分布式限速、重试和短期协调。
+异步任务的事实库是 PostgreSQL。Redis 用于 BullMQ 队列、分布式限速、重试和短期协调。异步 worker 不维护真实上游密钥，而是通过 `executor.execute_url` 调 new-api internal execute，由 new-api 使用已锁定渠道完成真实上游调用。
 
 ## Docker Compose 部署
 

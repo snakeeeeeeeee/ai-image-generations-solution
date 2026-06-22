@@ -83,6 +83,8 @@ function buildTestConfig(baseUrl: string, overrides: DeepPartial<AppConfig> = {}
       callbackMaxRetryAgeHours: 24,
       callbackDefaultSecret: 'test-callback-secret',
       callbackSecrets: {},
+      internalExecuteSecrets: {},
+      internalExecuteAllowedHosts: ['127.0.0.1:1'],
       taskStaleProcessingTimeoutSeconds: 1800
     }
   };
@@ -131,6 +133,8 @@ function buildTestConfig(baseUrl: string, overrides: DeepPartial<AppConfig> = {}
       callbackMaxRetryAgeHours: overrides.asyncTasks?.callbackMaxRetryAgeHours ?? base.asyncTasks.callbackMaxRetryAgeHours,
       callbackDefaultSecret: overrides.asyncTasks?.callbackDefaultSecret ?? base.asyncTasks.callbackDefaultSecret,
       callbackSecrets: base.asyncTasks.callbackSecrets,
+      internalExecuteSecrets: base.asyncTasks.internalExecuteSecrets,
+      internalExecuteAllowedHosts: base.asyncTasks.internalExecuteAllowedHosts,
       taskStaleProcessingTimeoutSeconds: overrides.asyncTasks?.taskStaleProcessingTimeoutSeconds ?? base.asyncTasks.taskStaleProcessingTimeoutSeconds
     }
   };
@@ -301,13 +305,18 @@ test('admin async APIs expose task callback and queue status', async () => {
           provider_task_id: 'imgtask_1',
           client_task_id: 'task_1',
           request_id: 'req_1',
-          provider: 'openai',
+          provider: 'new_api_internal',
           model: 'gpt-image-2',
           operation: 'generation',
           status: 'succeeded',
           parameters: {
             size: '1024x1024',
             output_format: 'png'
+          },
+          executor: {
+            type: 'new_api_internal',
+            execute_url: 'http://newapi-master:3000/api/internal/image/tasks/task_1/execute',
+            secret_id: 'image_handle_1'
           },
           metadata: {
             channel_id: 'channel_123'

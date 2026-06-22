@@ -80,6 +80,8 @@ function buildTestConfig(baseUrl: string, overrides: DeepPartial<AppConfig> = {}
       callbackMaxRetryAgeHours: 24,
       callbackDefaultSecret: 'test-callback-secret',
       callbackSecrets: {},
+      internalExecuteSecrets: {},
+      internalExecuteAllowedHosts: ['127.0.0.1:1'],
       taskStaleProcessingTimeoutSeconds: 1800
     }
   };
@@ -128,6 +130,8 @@ function buildTestConfig(baseUrl: string, overrides: DeepPartial<AppConfig> = {}
       callbackMaxRetryAgeHours: overrides.asyncTasks?.callbackMaxRetryAgeHours ?? base.asyncTasks.callbackMaxRetryAgeHours,
       callbackDefaultSecret: overrides.asyncTasks?.callbackDefaultSecret ?? base.asyncTasks.callbackDefaultSecret,
       callbackSecrets: base.asyncTasks.callbackSecrets,
+      internalExecuteSecrets: base.asyncTasks.internalExecuteSecrets,
+      internalExecuteAllowedHosts: base.asyncTasks.internalExecuteAllowedHosts,
       taskStaleProcessingTimeoutSeconds: overrides.asyncTasks?.taskStaleProcessingTimeoutSeconds ?? base.asyncTasks.taskStaleProcessingTimeoutSeconds
     }
   };

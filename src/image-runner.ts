@@ -95,6 +95,15 @@ export interface ExecuteUpstreamPayloadOptions {
   upload?: UploadImageToR2;
 }
 
+export interface UploadImageSourcesOptions {
+  sources: ImageSource[];
+  allowedFormats: ImageMetadata['format'][];
+  config: AppConfig;
+  dispatcher: UpstreamDispatcher;
+  r2Client: S3Client;
+  upload?: UploadImageToR2;
+}
+
 export function getRequestMetadata(body: ImageRequestBody | undefined): { model?: string; size?: string } {
   return {
     model: typeof body?.model === 'string' ? body.model : undefined,
@@ -491,7 +500,58 @@ export async function executeUpstreamPayload({
     });
   }
 
-  for (const source of imageSources) {
+  const uploaded = await uploadImageSources({
+    sources: imageSources,
+    allowedFormats: payload.strategy.allowedFormats,
+    config,
+    dispatcher,
+    r2Client,
+    upload
+  });
+  outputData.push(...uploaded.data);
+  outputImages.push(...uploaded.outputImages);
+  timings.decode_ms += uploaded.timings.decode_ms;
+  timings.upload_ms += uploaded.timings.upload_ms;
+  totalImageBytes += uploaded.imageBytes;
+
+  const created = upstreamResponse.created || Math.floor(Date.now() / 1000);
+  const imageUrls = outputData.map((item) => item.url);
+  return {
+    created,
+    data: outputData,
+    outputImages,
+    responseParams: buildResponseParams(upstreamResponse, outputImages, payload.strategy),
+    requestParams: payload.requestParams,
+    metadata: payload.metadata,
+    timings,
+    imageBytes: totalImageBytes,
+    imageCount: outputData.length,
+    imageUrls
+  };
+}
+
+export async function uploadImageSources({
+  sources,
+  allowedFormats,
+  config,
+  dispatcher,
+  r2Client,
+  upload = uploadImageToR2
+}: UploadImageSourcesOptions): Promise<{
+  data: Array<{ url: string }>;
+  outputImages: Array<ImageMetadata & { sourceType: ImageSourceType }>;
+  timings: Pick<RunnerTimings, 'decode_ms' | 'upload_ms'>;
+  imageBytes: number;
+}> {
+  const outputData: Array<{ url: string }> = [];
+  const outputImages: Array<ImageMetadata & { sourceType: ImageSourceType }> = [];
+  const timings = {
+    decode_ms: 0,
+    upload_ms: 0
+  };
+  let totalImageBytes = 0;
+
+  for (const source of sources) {
     const decodeStartedAt = performance.now();
     const buffer = await loadImageSource({
       source,
@@ -499,13 +559,12 @@ export async function executeUpstreamPayload({
       dispatcher
     });
     const imageMetadata = readImageMetadata(buffer);
-    if (!payload.strategy.allowedFormats.includes(imageMetadata.format)) {
-      throw new AppError('Upstream returned unsupported image format for selected strategy', {
+    if (!allowedFormats.includes(imageMetadata.format)) {
+      throw new AppError('Upstream returned unsupported image format', {
         statusCode: 502,
         type: 'server_error',
         code: 'unsupported_image_format',
         cause: {
-          strategy: payload.strategy.name,
           format: imageMetadata.format
         }
       });
@@ -530,19 +589,11 @@ export async function executeUpstreamPayload({
     outputData.push({ url });
   }
 
-  const created = upstreamResponse.created || Math.floor(Date.now() / 1000);
-  const imageUrls = outputData.map((item) => item.url);
   return {
-    created,
     data: outputData,
     outputImages,
-    responseParams: buildResponseParams(upstreamResponse, outputImages, payload.strategy),
-    requestParams: payload.requestParams,
-    metadata: payload.metadata,
     timings,
-    imageBytes: totalImageBytes,
-    imageCount: outputData.length,
-    imageUrls
+    imageBytes: totalImageBytes
   };
 }
 

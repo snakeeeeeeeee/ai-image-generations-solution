@@ -56,6 +56,33 @@ app.post('/api/task/callback/external-image/:taskId', async (request) => {
   };
 });
 
+app.post('/api/internal/image/tasks/:taskId/execute', async (request) => {
+  const params = request.params as { taskId: string };
+  request.log.info({
+    task_id: params.taskId,
+    headers: {
+      secret_id: request.headers['x-imagehandle-secret-id'],
+      event_id: request.headers['x-imagehandle-event-id'],
+      timestamp: request.headers['x-imagehandle-timestamp'],
+      signature_present: Boolean(request.headers['x-imagehandle-signature'])
+    },
+    body: request.body
+  }, 'mock new-api 收到 internal execute 请求');
+
+  return {
+    status: 'succeeded',
+    images: [
+      {
+        b64_json: tinyPngBase64,
+        mime_type: 'image/png'
+      }
+    ],
+    usage: {
+      actual_quota: 0
+    }
+  };
+});
+
 app.post('/v1/images/generations', async (request) => {
   request.log.info({
     authorization_present: Boolean(request.headers.authorization),

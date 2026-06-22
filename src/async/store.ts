@@ -3,11 +3,13 @@ import pg from 'pg';
 import type {
   AsyncTaskCallback,
   AsyncTaskError,
+  AsyncTaskExecutor,
   AsyncTaskRecord,
   AsyncTaskRequest,
   AsyncTaskStatus,
   CallbackEventRecord
 } from './types.js';
+import { NEW_API_INTERNAL_EXECUTOR } from './types.js';
 
 const { Pool } = pg;
 const MIGRATION_LOCK_ID = 2026062201;
@@ -26,6 +28,7 @@ interface TaskRow {
   input_json: unknown;
   parameters_json: unknown;
   provider_options_json: unknown;
+  executor_json: unknown;
   callback_json: unknown;
   metadata_json: unknown;
   result_json: unknown | null;
@@ -78,6 +81,7 @@ export interface AdminAsyncTaskRecord {
   model: string;
   operation: 'generation' | 'edit';
   status: AsyncTaskStatus;
+  executor: AsyncTaskExecutor;
   parameters: Record<string, unknown>;
   metadata: Record<string, unknown>;
   attempts: number;
@@ -155,6 +159,7 @@ export class AsyncTaskStore {
           input_json JSONB NOT NULL DEFAULT '{}'::jsonb,
           parameters_json JSONB NOT NULL DEFAULT '{}'::jsonb,
           provider_options_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+          executor_json JSONB NOT NULL DEFAULT '{}'::jsonb,
           callback_json JSONB NOT NULL DEFAULT '{}'::jsonb,
           metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
           result_json JSONB,
@@ -193,6 +198,10 @@ export class AsyncTaskStore {
         CREATE INDEX IF NOT EXISTS idx_callback_events_status_next_attempt
           ON callback_events(status, next_attempt_at);
       `);
+      await client.query(`
+        ALTER TABLE image_tasks
+          ADD COLUMN IF NOT EXISTS executor_json JSONB NOT NULL DEFAULT '{}'::jsonb
+      `);
       await client.query('COMMIT');
     } catch (error) {
       await client.query('ROLLBACK');
@@ -218,10 +227,11 @@ export class AsyncTaskStore {
         input_json,
         parameters_json,
         provider_options_json,
+        executor_json,
         callback_json,
         metadata_json
       ) VALUES (
-        $1, $2, $3, $4, $5, $6, $7, 'queued', $8, $9, $10, $11, $12
+        $1, $2, $3, $4, $5, $6, $7, 'queued', $8, $9, $10, $11, $12, $13
       )
       ON CONFLICT (provider_api_key_hash, client_task_id) DO NOTHING
       RETURNING *
@@ -230,12 +240,13 @@ export class AsyncTaskStore {
       request.client_task_id,
       request.request_id,
       keyHash,
-      request.provider,
+      NEW_API_INTERNAL_EXECUTOR,
       request.model,
       request.operation,
       request.input ?? {},
       request.parameters ?? {},
-      request.provider_options ?? {},
+      {},
+      request.executor ?? {},
       request.callback ?? {},
       request.metadata ?? {}
     ]);
@@ -339,6 +350,19 @@ export class AsyncTaskStore {
     } finally {
       client.release();
     }
+  }
+
+  async retryTask(providerTaskId: string, error: AsyncTaskError): Promise<boolean> {
+    const result = await this.pool.query<{ provider_task_id: string }>(`
+      UPDATE image_tasks
+      SET status = 'queued',
+          error_json = $2,
+          updated_at = now()
+      WHERE provider_task_id = $1
+        AND status = 'processing'
+      RETURNING provider_task_id
+    `, [providerTaskId, error]);
+    return (result.rowCount ?? 0) > 0;
   }
 
   async requeueStaleProcessing(timeoutSeconds: number): Promise<string[]> {
@@ -627,6 +651,7 @@ function mapTaskRow(row: TaskRow): AsyncTaskRecord {
     input: safeObject(row.input_json),
     parameters: safeObject(row.parameters_json),
     provider_options: safeObject(row.provider_options_json),
+    executor: safeObject(row.executor_json) as unknown as AsyncTaskExecutor,
     callback: safeObject(row.callback_json),
     metadata: safeObject(row.metadata_json),
     result: row.result_json ? safeObject(row.result_json) : null,
@@ -658,6 +683,7 @@ function mapAdminTaskRow(row: TaskRow): AdminAsyncTaskRecord {
     model: row.model,
     operation: row.operation,
     status: row.status,
+    executor: safeObject(row.executor_json) as unknown as AsyncTaskExecutor,
     parameters: safeObject(row.parameters_json),
     metadata: safeObject(row.metadata_json),
     attempts: row.attempts,

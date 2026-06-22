@@ -3,10 +3,33 @@ import { test } from 'node:test';
 import Fastify from 'fastify';
 import type { AddressInfo } from 'node:net';
 import type { AppConfig } from '../src/config.js';
-import { buildProviderImageBody, normalizeAsyncTaskRequest } from '../src/async/request.js';
+import { normalizeAsyncTaskRequest } from '../src/async/request.js';
 import { flushCallbacks } from '../src/async/notifier.js';
 
 function buildTestConfig(overrides: Partial<AppConfig['asyncTasks']> = {}): AppConfig {
+  const asyncTasks: AppConfig['asyncTasks'] = {
+    postgresUrl: '',
+    redisUrl: '',
+    providerApiKeys: ['provider-test-key'],
+    workerConcurrency: 20,
+    imageProcessingConcurrency: 10,
+    globalRateLimitIpm: 250,
+    providerRateLimitConfig: {},
+    callbackBatchSize: 50,
+    callbackFlushMs: 2000,
+    callbackMaxRetryAgeHours: 24,
+    callbackDefaultSecret: 'default-secret',
+    callbackSecrets: {
+      channel_123: 'channel-secret'
+    },
+    internalExecuteSecrets: {
+      image_handle_1: 'internal-secret'
+    },
+    internalExecuteAllowedHosts: ['127.0.0.1:1'],
+    taskStaleProcessingTimeoutSeconds: 1800,
+    ...overrides
+  };
+
   return {
     port: 0,
     host: '127.0.0.1',
@@ -56,32 +79,14 @@ function buildTestConfig(overrides: Partial<AppConfig['asyncTasks']> = {}): AppC
       recentLimit: 1000,
       cookieSecure: false
     },
-    asyncTasks: {
-      postgresUrl: '',
-      redisUrl: '',
-      providerApiKeys: ['provider-test-key'],
-      workerConcurrency: 20,
-      imageProcessingConcurrency: 10,
-      globalRateLimitIpm: 250,
-      providerRateLimitConfig: {},
-      callbackBatchSize: 50,
-      callbackFlushMs: 2000,
-      callbackMaxRetryAgeHours: 24,
-      callbackDefaultSecret: 'default-secret',
-      callbackSecrets: {
-        channel_123: 'channel-secret'
-      },
-      taskStaleProcessingTimeoutSeconds: 1800,
-      ...overrides
-    }
+    asyncTasks
   };
 }
 
-test('async task request maps input.text to upstream prompt and keeps parameters', () => {
+test('async task request requires new_api_internal executor', () => {
   const request = normalizeAsyncTaskRequest({
     request_id: 'req_1',
     client_task_id: 'task_1',
-    provider: 'openai',
     model: 'gpt-image-2',
     operation: 'generation',
     input: {
@@ -91,17 +96,31 @@ test('async task request maps input.text to upstream prompt and keeps parameters
       size: '2048x2048',
       output_format: 'webp'
     },
-    provider_options: {
-      moderation: 'auto'
+    executor: {
+      type: 'new_api_internal',
+      execute_url: 'http://127.0.0.1:1/api/internal/image/tasks/task_1/execute',
+      secret_id: 'image_handle_1'
     }
   });
 
-  const body = buildProviderImageBody(request);
-  assert.equal(body.model, 'gpt-image-2');
-  assert.equal(body.prompt, 'a cyberpunk city');
-  assert.equal(body.size, '2048x2048');
-  assert.equal(body.output_format, 'webp');
-  assert.equal(body.moderation, 'auto');
+  assert.equal(request.model, 'gpt-image-2');
+  assert.equal(request.input.text, 'a cyberpunk city');
+  assert.equal(request.parameters?.size, '2048x2048');
+  assert.equal(request.executor.type, 'new_api_internal');
+  assert.equal(request.executor.secret_id, 'image_handle_1');
+});
+
+test('async task request rejects missing executor', () => {
+  assert.throws(() => normalizeAsyncTaskRequest({
+    request_id: 'req_1',
+    client_task_id: 'task_1',
+    ignored_field: 'ignored',
+    model: 'gpt-image-2',
+    operation: 'generation',
+    input: {
+      text: 'a cyberpunk city'
+    }
+  }), /executor must be an object/);
 });
 
 test('回调投递进程按 secret_id 分组并发送 X-Callback-Secret-Id 请求头', async () => {

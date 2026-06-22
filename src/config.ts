@@ -67,6 +67,8 @@ export interface AsyncTaskConfig {
   callbackMaxRetryAgeHours: number;
   callbackDefaultSecret: string;
   callbackSecrets: Record<string, string>;
+  internalExecuteSecrets: Record<string, string>;
+  internalExecuteAllowedHosts: string[];
   taskStaleProcessingTimeoutSeconds: number;
 }
 
@@ -98,6 +100,14 @@ function parseMegabytes(name: string, fallback: number): number {
 
 function normalizeBaseUrl(value: string): string {
   return value.replace(/\/+$/, '');
+}
+
+function hostFromBaseUrl(value: string): string {
+  try {
+    return new URL(value).host;
+  } catch {
+    return '';
+  }
 }
 
 function normalizePath(value: string): string {
@@ -245,6 +255,8 @@ export function loadConfig(): AppConfig {
       callbackMaxRetryAgeHours: parsePositiveInt('CALLBACK_MAX_RETRY_AGE_HOURS', 24),
       callbackDefaultSecret: optionalEnv('CALLBACK_DEFAULT_SECRET', ''),
       callbackSecrets: parseStringMapEnv('CALLBACK_SECRETS_JSON', '{}'),
+      internalExecuteSecrets: parseStringMapEnv('INTERNAL_EXECUTE_SECRETS_JSON', '{}'),
+      internalExecuteAllowedHosts: parseCsvEnv('INTERNAL_EXECUTE_ALLOWED_HOSTS', hostFromBaseUrl(normalizeBaseUrl(requireEnv('NEW_API_BASE_URL')))),
       taskStaleProcessingTimeoutSeconds: parsePositiveInt('TASK_STALE_PROCESSING_TIMEOUT_SECONDS', 1800)
     }
   };

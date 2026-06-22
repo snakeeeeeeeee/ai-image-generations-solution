@@ -1,5 +1,6 @@
 export type AsyncTaskStatus = 'submitted' | 'queued' | 'processing' | 'succeeded' | 'failed';
 export type AsyncTaskOperation = 'generation' | 'edit';
+export const NEW_API_INTERNAL_EXECUTOR = 'new_api_internal';
 
 export interface AsyncTaskInput {
   text?: string;
@@ -15,15 +16,23 @@ export interface AsyncTaskCallback {
   [key: string]: unknown;
 }
 
+export interface NewApiInternalExecutor {
+  type: typeof NEW_API_INTERNAL_EXECUTOR;
+  execute_url: string;
+  secret_id: string;
+  [key: string]: unknown;
+}
+
+export type AsyncTaskExecutor = NewApiInternalExecutor;
+
 export interface AsyncTaskRequest {
   request_id: string;
   client_task_id: string;
-  provider: string;
   model: string;
   operation: AsyncTaskOperation;
   input: AsyncTaskInput;
   parameters?: Record<string, unknown>;
-  provider_options?: Record<string, unknown>;
+  executor: AsyncTaskExecutor;
   callback?: AsyncTaskCallback;
   metadata?: Record<string, unknown>;
 }
@@ -40,6 +49,7 @@ export interface AsyncTaskRecord {
   input: AsyncTaskInput;
   parameters: Record<string, unknown>;
   provider_options: Record<string, unknown>;
+  executor: AsyncTaskExecutor;
   callback: AsyncTaskCallback;
   metadata: Record<string, unknown>;
   result: Record<string, unknown> | null;

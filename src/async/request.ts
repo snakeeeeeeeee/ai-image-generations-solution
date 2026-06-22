@@ -1,6 +1,6 @@
 import { AppError } from '../errors.js';
-import type { ImageRequestBody } from '../image.js';
-import type { AsyncTaskRequest } from './types.js';
+import { NEW_API_INTERNAL_EXECUTOR } from './types.js';
+import type { AsyncTaskExecutor, AsyncTaskRequest } from './types.js';
 
 const SUPPORTED_OPERATIONS = new Set(['generation', 'edit']);
 
@@ -18,7 +18,7 @@ export function getBearerToken(header: string | undefined): string | undefined {
 export function authorizeProviderKey(header: string | undefined, allowedKeys: string[]): string {
   const token = getBearerToken(header);
   if (!token) {
-    throw new AppError('Missing provider Authorization bearer token', {
+    throw new AppError('Missing image-handle Authorization bearer token', {
       statusCode: 401,
       type: 'invalid_request_error',
       code: 'missing_authorization'
@@ -26,7 +26,7 @@ export function authorizeProviderKey(header: string | undefined, allowedKeys: st
   }
 
   if (allowedKeys.length > 0 && !allowedKeys.includes(token)) {
-    throw new AppError('Invalid provider API key', {
+    throw new AppError('Invalid image-handle API key', {
       statusCode: 401,
       type: 'invalid_request_error',
       code: 'invalid_provider_api_key'
@@ -48,7 +48,6 @@ export function normalizeAsyncTaskRequest(body: unknown): AsyncTaskRequest {
   const value = body as Record<string, unknown>;
   const requestId = requireString(value, 'request_id');
   const clientTaskId = requireString(value, 'client_task_id');
-  const provider = requireString(value, 'provider');
   const model = requireString(value, 'model');
   const operation = requireString(value, 'operation');
   if (!SUPPORTED_OPERATIONS.has(operation)) {
@@ -61,7 +60,7 @@ export function normalizeAsyncTaskRequest(body: unknown): AsyncTaskRequest {
 
   const input = getObject(value.input, 'input');
   const parameters = getOptionalObject(value.parameters, 'parameters');
-  const providerOptions = getOptionalObject(value.provider_options, 'provider_options');
+  const executor = parseExecutor(value.executor);
   const callback = getOptionalObject(value.callback, 'callback');
   const metadata = getOptionalObject(value.metadata, 'metadata');
 
@@ -76,35 +75,14 @@ export function normalizeAsyncTaskRequest(body: unknown): AsyncTaskRequest {
   return {
     request_id: requestId,
     client_task_id: clientTaskId,
-    provider,
     model,
     operation: operation as AsyncTaskRequest['operation'],
     input,
     parameters,
-    provider_options: providerOptions,
+    executor,
     callback,
     metadata
   };
-}
-
-export function buildProviderImageBody(task: AsyncTaskRequest): ImageRequestBody {
-  const body: ImageRequestBody = {
-    ...task.parameters,
-    ...task.provider_options,
-    model: task.model,
-    prompt: task.input.text
-  };
-
-  if (Array.isArray(task.input.images) && task.input.images.length > 0) {
-    body.image = task.input.images.map((url) => ({ image_url: url }));
-  }
-  if (typeof task.input.mask === 'string' && task.input.mask.trim() !== '') {
-    body.mask = {
-      image_url: task.input.mask
-    };
-  }
-
-  return body;
 }
 
 function requireString(value: Record<string, unknown>, key: string): string {
@@ -135,4 +113,49 @@ function getOptionalObject(value: unknown, name: string): Record<string, unknown
     return {};
   }
   return getObject(value, name);
+}
+
+function parseExecutor(value: unknown): AsyncTaskExecutor {
+  const executor = getObject(value, 'executor');
+  const type = executor.type;
+  if (type !== NEW_API_INTERNAL_EXECUTOR) {
+    throw new AppError('executor.type must be new_api_internal', {
+      statusCode: 400,
+      type: 'invalid_request_error',
+      code: 'unsupported_executor'
+    });
+  }
+
+  const executeUrl = requireString(executor, 'execute_url');
+  const secretId = requireString(executor, 'secret_id');
+  validateExecuteUrl(executeUrl);
+
+  return {
+    ...executor,
+    type: NEW_API_INTERNAL_EXECUTOR,
+    execute_url: executeUrl,
+    secret_id: secretId
+  };
+}
+
+function validateExecuteUrl(value: string): void {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch (error) {
+    throw new AppError('executor.execute_url must be a valid URL', {
+      statusCode: 400,
+      type: 'invalid_request_error',
+      code: 'invalid_execute_url',
+      cause: error
+    });
+  }
+
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new AppError('executor.execute_url protocol is unsupported', {
+      statusCode: 400,
+      type: 'invalid_request_error',
+      code: 'invalid_execute_url'
+    });
+  }
 }

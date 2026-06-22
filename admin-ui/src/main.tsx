@@ -153,6 +153,11 @@ interface AsyncTaskRecord {
   client_task_id: string;
   request_id: string;
   provider: string;
+  executor?: {
+    type?: string;
+    execute_url?: string;
+    secret_id?: string;
+  };
   model: string;
   operation: 'generation' | 'edit';
   status: 'submitted' | 'queued' | 'processing' | 'succeeded' | 'failed';
@@ -1040,7 +1045,7 @@ function AsyncTaskTable({ page, enabled, onPageChange, onPageSizeChange }: {
               <th>状态</th>
               <th>new-api 任务</th>
               <th>内部任务</th>
-              <th>平台/模型</th>
+              <th>执行器/模型</th>
               <th>类型</th>
               <th>参数</th>
               <th>尝试</th>
@@ -1065,7 +1070,7 @@ function AsyncTaskTable({ page, enabled, onPageChange, onPageSizeChange }: {
                 <td><AsyncStatusPill status={task.status} /></td>
                 <td className="id-cell">{task.client_task_id}</td>
                 <td className="id-cell">{task.provider_task_id}</td>
-                <td>{task.provider} / {task.model}</td>
+                <td>{formatExecutorLabel(task)} / {task.model}</td>
                 <td>{asyncOperationLabel(task.operation)}</td>
                 <td className="params-cell">
                   <span className="single-line">{formatAsyncTaskParams(task)}</span>
@@ -1610,6 +1615,10 @@ function formatTaskError(task: AsyncTaskRecord): string {
   }
   const brief = message.length > 48 ? `${message.slice(0, 47)}...` : message;
   return `${code} · ${brief}`;
+}
+
+function formatExecutorLabel(task: AsyncTaskRecord): string {
+  return task.executor?.type || task.provider || '-';
 }
 
 function formatErrorSummary(request: RequestRecord): string {
