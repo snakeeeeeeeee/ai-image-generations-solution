@@ -401,6 +401,101 @@ new-api 侧需要保存或配置：
 
 ## 12. 最小联调命令
 
+### 12.1 异步生图
+
+使用线上域名时，把 `<provider_api_key>` 替换成 image-handle `PROVIDER_API_KEYS` 中配置的服务鉴权 key。这个 key 是 new-api 调 image-handle 用的，不是最终用户的 OpenAI key。
+
+```bash
+TASK_ID="task_test_$(date +%s)"
+
+curl --location 'https://api.supertoken.cc/image-wrapper/v1/image/tasks' \
+  -H "Authorization: Bearer <provider_api_key>" \
+  -H 'Content-Type: application/json' \
+  -d "{
+    \"request_id\": \"req_${TASK_ID}\",
+    \"client_task_id\": \"${TASK_ID}\",
+    \"provider\": \"openai\",
+    \"model\": \"gpt-image-2\",
+    \"operation\": \"generation\",
+    \"input\": {
+      \"text\": \"吃铜锣烧的机器猫\"
+    },
+    \"parameters\": {
+      \"size\": \"2560x1440\",
+      \"quality\": \"auto\",
+      \"n\": 1,
+      \"output_format\": \"png\"
+    },
+    \"metadata\": {
+      \"channel_id\": \"manual_test\"
+    }
+  }"
+```
+
+返回：
+
+```json
+{
+  "provider_task_id": "imgtask_xxx",
+  "client_task_id": "task_test_xxx",
+  "status": "queued"
+}
+```
+
+### 12.2 异步编辑图
+
+编辑图使用同一个提交接口，区别是：
+
+- `operation` 使用 `edit`。
+- `input.images` 放待编辑图片 URL 数组。
+- `input.mask` 可选，放 mask 图片 URL。
+- `input.text` 仍然作为统一文本输入，image-handle 会映射成上游 `prompt`。
+
+```bash
+TASK_ID="task_edit_$(date +%s)"
+
+curl --location 'https://api.supertoken.cc/image-wrapper/v1/image/tasks' \
+  -H "Authorization: Bearer <provider_api_key>" \
+  -H 'Content-Type: application/json' \
+  -d "{
+    \"request_id\": \"req_${TASK_ID}\",
+    \"client_task_id\": \"${TASK_ID}\",
+    \"provider\": \"openai\",
+    \"model\": \"gpt-image-2\",
+    \"operation\": \"edit\",
+    \"input\": {
+      \"text\": \"把图片里的角色改成正在吃铜锣烧的机器猫，保持背景风格一致\",
+      \"images\": [
+        \"https://img.example.com/source/input.png\"
+      ],
+      \"mask\": null
+    },
+    \"parameters\": {
+      \"size\": \"2560x1440\",
+      \"quality\": \"auto\",
+      \"n\": 1,
+      \"output_format\": \"png\"
+    },
+    \"metadata\": {
+      \"channel_id\": \"manual_test\"
+    }
+  }"
+```
+
+如果上游模型需要 mask，把 `mask` 改成公开可访问的 mask 图片 URL：
+
+```json
+{
+  "input": {
+    "text": "只替换透明区域里的主体",
+    "images": ["https://img.example.com/source/input.png"],
+    "mask": "https://img.example.com/source/mask.png"
+  }
+}
+```
+
+### 12.3 本地 mock 联调
+
 提交任务：
 
 ```bash
@@ -432,11 +527,39 @@ curl http://127.0.0.1:8787/v1/image/tasks \
   }'
 ```
 
+### 12.4 查询任务
+
+单个查询：
+
+```bash
+curl --location 'https://api.supertoken.cc/image-wrapper/v1/image/tasks/imgtask_xxx' \
+  -H "Authorization: Bearer <provider_api_key>"
+```
+
 批量查询：
 
 ```bash
-curl http://127.0.0.1:8787/v1/image/tasks/query \
-  -H 'Authorization: Bearer provider-test-key' \
+curl --location 'https://api.supertoken.cc/image-wrapper/v1/image/tasks/query' \
+  -H "Authorization: Bearer <provider_api_key>" \
   -H 'Content-Type: application/json' \
   -d '{"task_ids":["imgtask_xxx"]}'
+```
+
+### 12.5 带回调的提交示例
+
+手动测试时可以不传 `callback`。不传时任务仍会执行、写 PostgreSQL、上传 R2，只是不会通知 new-api。
+
+new-api 正式对接时建议传：
+
+```json
+{
+  "callback": {
+    "url": "http://newapi-master:3000/api/task/callback/external-image/task_xxx",
+    "batch_url": "http://newapi-master:3000/api/task/callback/external-image/batch",
+    "secret_id": "channel_123"
+  },
+  "metadata": {
+    "channel_id": "channel_123"
+  }
+}
 ```

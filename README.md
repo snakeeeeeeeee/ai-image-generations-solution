@@ -121,6 +121,31 @@ curl http://127.0.0.1:8787/v1/image/tasks \
   }'
 ```
 
+异步编辑图使用同一个接口，`operation` 改为 `edit`，并把待编辑图片放到 `input.images`：
+
+```bash
+curl http://127.0.0.1:8787/v1/image/tasks \
+  -H 'Authorization: Bearer provider-test-key' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "request_id": "req_edit_1",
+    "client_task_id": "task_edit_1",
+    "provider": "openai",
+    "model": "gpt-image-2",
+    "operation": "edit",
+    "input": {
+      "text": "把图片里的角色改成正在吃铜锣烧的机器猫",
+      "images": ["https://img.example.com/source/input.png"],
+      "mask": null
+    },
+    "parameters": {
+      "size": "1024x1024",
+      "n": 1,
+      "output_format": "png"
+    }
+  }'
+```
+
 查询单个任务：
 
 ```bash
