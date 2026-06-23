@@ -273,6 +273,7 @@ async function executeDirectLeaseTask({
   const payload = task.operation === 'edit'
     ? await buildEditPayloadFromUrls({ task, body, config: directConfig, dispatcher })
     : buildDirectJsonPayload({ body, config: directConfig });
+  logDirectLeaseDebug(task, lease, directConfig);
   const execution = await executeUpstreamPayload({
     payload,
     authorization: `Bearer ${lease.api_key}`,
@@ -280,7 +281,13 @@ async function executeDirectLeaseTask({
     operation: task.operation,
     dispatcher,
     r2Client,
-    upload
+    upload,
+    debug: {
+      enabled: isUpstreamDebugEnabled(task),
+      taskId: task.client_task_id,
+      providerTaskId: task.provider_task_id,
+      channelId: lease.channel_id || getString(task.metadata.channel_id)
+    }
   });
 
   return {
@@ -288,6 +295,25 @@ async function executeDirectLeaseTask({
     usage: safeObject(execution.upstreamResponse.usage),
     rawResponse: rewriteRawResponseImages(execution.upstreamResponse, execution.data)
   };
+}
+
+function isUpstreamDebugEnabled(task: AsyncTaskRecord): boolean {
+  return task.metadata.debug_upstream === true || task.metadata.debug_upstream === 'true';
+}
+
+function logDirectLeaseDebug(task: AsyncTaskRecord, lease: CredentialLease, config: AppConfig): void {
+  if (!isUpstreamDebugEnabled(task)) {
+    return;
+  }
+  console.info(`[image-handle upstream debug task=${task.client_task_id} provider_task=${task.provider_task_id} channel=${lease.channel_id || getString(task.metadata.channel_id) || '-'}] resolve ${JSON.stringify({
+    provider: lease.provider,
+    request_format: lease.request_format,
+    base_url: lease.base_url,
+    model: lease.model,
+    operation: task.operation,
+    final_path: task.operation === 'generation' ? config.upstream.imagesPath : config.upstream.imageEditsPath,
+    expires_at: lease.expires_at
+  })}`);
 }
 
 async function resolveCredentialLease({

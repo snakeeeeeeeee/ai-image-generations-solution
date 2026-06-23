@@ -94,6 +94,14 @@ export interface ExecuteUpstreamPayloadOptions {
   dispatcher: UpstreamDispatcher;
   r2Client: S3Client;
   upload?: UploadImageToR2;
+  debug?: UpstreamDebugContext;
+}
+
+export interface UpstreamDebugContext {
+  enabled: boolean;
+  taskId?: string;
+  providerTaskId?: string;
+  channelId?: string;
 }
 
 export interface UploadImageSourcesOptions {
@@ -173,6 +181,120 @@ function isAbortError(error: unknown): boolean {
   return error instanceof Error && error.name === 'AbortError';
 }
 
+function shouldDebugUpstream(debug: UpstreamDebugContext | undefined): boolean {
+  return debug?.enabled === true;
+}
+
+function debugPrefix(debug: UpstreamDebugContext | undefined): string {
+  const parts = [
+    `task=${debug?.taskId ?? '-'}`,
+    `provider_task=${debug?.providerTaskId ?? '-'}`,
+    `channel=${debug?.channelId ?? '-'}`
+  ];
+  return `[image-handle upstream debug ${parts.join(' ')}]`;
+}
+
+function truncateForLog(value: string, maxChars = 8000): string {
+  if (value.length <= maxChars) {
+    return value;
+  }
+  return `${value.slice(0, maxChars)}...[truncated ${value.length - maxChars} chars]`;
+}
+
+function redactHeaderValue(key: string, value: string): string {
+  const lower = key.toLowerCase();
+  if (lower === 'authorization' || lower.includes('api-key') || lower.includes('secret')) {
+    return '[redacted]';
+  }
+  return value;
+}
+
+function redactHeaders(headers: Record<string, string>): Record<string, string> {
+  const output: Record<string, string> = {};
+  for (const [key, value] of Object.entries(headers)) {
+    output[key] = redactHeaderValue(key, value);
+  }
+  return output;
+}
+
+function safeJsonForLog(value: unknown): unknown {
+  if (typeof value === 'string') {
+    if (value.startsWith('data:image/') || value.length > 1024) {
+      return `[omitted string len=${value.length}]`;
+    }
+    return value;
+  }
+  if (!value || typeof value !== 'object') {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.map(safeJsonForLog);
+  }
+  const output: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+    const lower = key.toLowerCase();
+    if (lower.includes('b64_json') || lower.includes('base64') || lower.includes('api_key') || lower.includes('authorization') || lower.includes('secret')) {
+      output[key] = '[redacted]';
+      continue;
+    }
+    output[key] = safeJsonForLog(item);
+  }
+  return output;
+}
+
+function bodyForLog(body: string | FormData): unknown {
+  if (typeof body !== 'string') {
+    return '[multipart/form-data omitted]';
+  }
+  try {
+    return safeJsonForLog(JSON.parse(body) as unknown);
+  } catch {
+    return truncateForLog(body);
+  }
+}
+
+function logUpstreamRequest(
+  debug: UpstreamDebugContext | undefined,
+  request: {
+    url: string;
+    operation: ImageOperation;
+    headers: Record<string, string>;
+    body: string | FormData;
+    strategy: string;
+  }
+): void {
+  if (!shouldDebugUpstream(debug)) {
+    return;
+  }
+  console.info(`${debugPrefix(debug)} request ${truncateForLog(JSON.stringify({
+    url: request.url,
+    operation: request.operation,
+    strategy: request.strategy,
+    headers: redactHeaders(request.headers),
+    body: bodyForLog(request.body)
+  }))}`);
+}
+
+function logUpstreamResponse(debug: UpstreamDebugContext | undefined, response: Response): void {
+  if (!shouldDebugUpstream(debug)) {
+    return;
+  }
+  console.info(`${debugPrefix(debug)} response status=${response.status} status_text=${response.statusText}`);
+}
+
+function logUpstreamResponseBody(debug: UpstreamDebugContext | undefined, text: string): void {
+  if (!shouldDebugUpstream(debug)) {
+    return;
+  }
+  let body: unknown = text;
+  try {
+    body = safeJsonForLog(JSON.parse(text) as unknown);
+  } catch {
+    body = truncateForLog(text);
+  }
+  console.info(`${debugPrefix(debug)} response_body ${truncateForLog(JSON.stringify(body))}`);
+}
+
 export function upstreamTimeoutError(error: unknown): AppError {
   return new AppError('new-api image generation timed out', {
     statusCode: 504,
@@ -182,8 +304,9 @@ export function upstreamTimeoutError(error: unknown): AppError {
   });
 }
 
-async function readUpstreamBody(response: Response): Promise<unknown> {
+async function readUpstreamBody(response: Response, debug?: UpstreamDebugContext): Promise<unknown> {
   const text = await response.text();
+  logUpstreamResponseBody(debug, text);
   if (!text) {
     return null;
   }
@@ -195,10 +318,10 @@ async function readUpstreamBody(response: Response): Promise<unknown> {
   }
 }
 
-export async function parseUpstreamResponse(response: Response): Promise<UpstreamImageResponse> {
+export async function parseUpstreamResponse(response: Response, debug?: UpstreamDebugContext): Promise<UpstreamImageResponse> {
   let responseBody: unknown;
   try {
-    responseBody = await readUpstreamBody(response);
+    responseBody = await readUpstreamBody(response, debug);
   } catch (error) {
     if (isAbortError(error)) {
       throw upstreamTimeoutError(error);
@@ -232,25 +355,37 @@ export async function fetchUpstream({
   authorization,
   operation,
   payload,
-  dispatcher
+  dispatcher,
+  debug
 }: {
   config: AppConfig;
   authorization?: string;
   operation: ImageOperation;
   payload: UpstreamRequestPayload;
   dispatcher: UpstreamDispatcher;
+  debug?: UpstreamDebugContext;
 }): Promise<Response> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), config.upstream.timeoutMs);
+  const url = upstreamUrl(config, operation);
 
   try {
-    return await undiciFetch(upstreamUrl(config, operation), {
+    logUpstreamRequest(debug, {
+      url,
+      operation,
+      headers: copyForwardHeaders(authorization, payload.headers),
+      body: payload.body,
+      strategy: payload.strategy.name
+    });
+    const response = await undiciFetch(url, {
       method: 'POST',
       headers: copyForwardHeaders(authorization, payload.headers),
       body: payload.body,
       signal: controller.signal,
       dispatcher
     });
+    logUpstreamResponse(debug, response);
+    return response;
   } catch (error) {
     if (isAbortError(error)) {
       throw upstreamTimeoutError(error);
@@ -471,7 +606,8 @@ export async function executeUpstreamPayload({
   operation,
   dispatcher,
   r2Client,
-  upload = uploadImageToR2
+  upload = uploadImageToR2,
+  debug
 }: ExecuteUpstreamPayloadOptions): Promise<ImageExecutionResult> {
   const timings: RunnerTimings = {
     openai_ms: 0,
@@ -486,8 +622,9 @@ export async function executeUpstreamPayload({
     authorization,
     operation,
     payload,
-    dispatcher
-  }));
+    dispatcher,
+    debug
+  }), debug);
   timings.openai_ms = msSince(upstreamStartedAt);
 
   const outputData: Array<{ url: string; mime_type?: string }> = [];

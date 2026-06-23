@@ -264,7 +264,8 @@ test('worker resolves credential lease, calls upstream directly, uploads R2, and
     },
     callback: {},
     metadata: {
-      channel_id: 'channel_123'
+      channel_id: 'channel_123',
+      debug_upstream: true
     },
     result: null,
     usage: null,
@@ -302,23 +303,32 @@ test('worker resolves credential lease, calls upstream directly, uploads R2, and
   const upload = async () => 'https://img.example.com/images/out.png';
 
   const dispatcher = new (await import('undici')).Agent();
-  await processTask({
-    job: {
-      data: {
-        provider_task_id: 'imgtask_1'
-      }
-    } as never,
-    config: buildTestConfig({
-      credentialLeaseAllowedHosts: [`127.0.0.1:${(address as AddressInfo).port}`]
-    }),
-    store: store as never,
-    taskQueue: taskQueue as never,
-    rateLimiter: rateLimiter as never,
-    imageProcessingLimiter: limiter as never,
-    upstreamDispatcher: dispatcher,
-    r2Client: {} as never,
-    upload
-  });
+  const logs: string[] = [];
+  const originalConsoleInfo = console.info;
+  console.info = (...args: unknown[]) => {
+    logs.push(args.map((arg) => String(arg)).join(' '));
+  };
+  try {
+    await processTask({
+      job: {
+        data: {
+          provider_task_id: 'imgtask_1'
+        }
+      } as never,
+      config: buildTestConfig({
+        credentialLeaseAllowedHosts: [`127.0.0.1:${(address as AddressInfo).port}`]
+      }),
+      store: store as never,
+      taskQueue: taskQueue as never,
+      rateLimiter: rateLimiter as never,
+      imageProcessingLimiter: limiter as never,
+      upstreamDispatcher: dispatcher,
+      r2Client: {} as never,
+      upload
+    });
+  } finally {
+    console.info = originalConsoleInfo;
+  }
 
   assert.equal(received.resolveSecretId, 'image_handle_1');
   assert.ok(received.resolveSignature);
@@ -349,6 +359,12 @@ test('worker resolves credential lease, calls upstream directly, uploads R2, and
   assert.equal(result.raw_response.data[0]?.b64_json, undefined);
   assert.equal(result.raw_response_truncated, false);
   assert.equal(JSON.stringify(completed[0]).includes('sk-secret-upstream'), false);
+  const joinedLogs = logs.join('\n');
+  assert.match(joinedLogs, /request/);
+  assert.match(joinedLogs, /\/images\/generations/);
+  assert.match(joinedLogs, /response_body/);
+  assert.match(joinedLogs, /gpt-image-2/);
+  assert.equal(joinedLogs.includes('sk-secret-upstream'), false);
 
   await dispatcher.close();
   await upstream.close();
