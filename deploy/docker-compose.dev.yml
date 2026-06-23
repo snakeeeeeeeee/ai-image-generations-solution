@@ -46,6 +46,7 @@ services:
     environment:
       MOCK_NEW_API_HOST: 0.0.0.0
       MOCK_NEW_API_PORT: ${MOCK_NEW_API_PORT:-3999}
+      MOCK_UPSTREAM_BASE_URL: http://mock-new-api:${MOCK_NEW_API_PORT:-3999}
     ports:
       - "${MOCK_NEW_API_HOST_PORT:-3999}:${MOCK_NEW_API_PORT:-3999}"
 
@@ -72,6 +73,8 @@ services:
       PROVIDER_API_KEYS: ${PROVIDER_API_KEYS:-provider-test-key}
       UPSTREAM_API_KEY: ${UPSTREAM_API_KEY:-local-upstream-key}
       CALLBACK_DEFAULT_SECRET: ${CALLBACK_DEFAULT_SECRET:-local-callback-secret}
+      CREDENTIAL_LEASE_SECRETS_JSON: ${CREDENTIAL_LEASE_SECRETS_JSON}
+      CREDENTIAL_LEASE_ALLOWED_HOSTS: ${CREDENTIAL_LEASE_ALLOWED_HOSTS:-mock-new-api:${MOCK_NEW_API_PORT:-3999}}
     ports:
       - "${IMAGE_API_HOST_PORT:-8787}:${PORT:-8787}"
 
@@ -96,6 +99,8 @@ services:
       PROVIDER_API_KEYS: ${PROVIDER_API_KEYS:-provider-test-key}
       UPSTREAM_API_KEY: ${UPSTREAM_API_KEY:-local-upstream-key}
       CALLBACK_DEFAULT_SECRET: ${CALLBACK_DEFAULT_SECRET:-local-callback-secret}
+      CREDENTIAL_LEASE_SECRETS_JSON: ${CREDENTIAL_LEASE_SECRETS_JSON}
+      CREDENTIAL_LEASE_ALLOWED_HOSTS: ${CREDENTIAL_LEASE_ALLOWED_HOSTS:-mock-new-api:${MOCK_NEW_API_PORT:-3999}}
 
   image-notifier:
     image: *app-image

@@ -83,8 +83,9 @@ function buildTestConfig(baseUrl: string, overrides: DeepPartial<AppConfig> = {}
       callbackMaxRetryAgeHours: 24,
       callbackDefaultSecret: 'test-callback-secret',
       callbackSecrets: {},
-      internalExecuteSecrets: {},
-      internalExecuteAllowedHosts: ['127.0.0.1:1'],
+      credentialLeaseSecrets: {},
+      credentialLeaseAllowedHosts: ['127.0.0.1:1'],
+      rawResponseMaxBytes: 256 * 1024,
       taskStaleProcessingTimeoutSeconds: 1800
     }
   };
@@ -133,8 +134,9 @@ function buildTestConfig(baseUrl: string, overrides: DeepPartial<AppConfig> = {}
       callbackMaxRetryAgeHours: overrides.asyncTasks?.callbackMaxRetryAgeHours ?? base.asyncTasks.callbackMaxRetryAgeHours,
       callbackDefaultSecret: overrides.asyncTasks?.callbackDefaultSecret ?? base.asyncTasks.callbackDefaultSecret,
       callbackSecrets: base.asyncTasks.callbackSecrets,
-      internalExecuteSecrets: base.asyncTasks.internalExecuteSecrets,
-      internalExecuteAllowedHosts: base.asyncTasks.internalExecuteAllowedHosts,
+      credentialLeaseSecrets: base.asyncTasks.credentialLeaseSecrets,
+      credentialLeaseAllowedHosts: base.asyncTasks.credentialLeaseAllowedHosts,
+      rawResponseMaxBytes: overrides.asyncTasks?.rawResponseMaxBytes ?? base.asyncTasks.rawResponseMaxBytes,
       taskStaleProcessingTimeoutSeconds: overrides.asyncTasks?.taskStaleProcessingTimeoutSeconds ?? base.asyncTasks.taskStaleProcessingTimeoutSeconds
     }
   };
@@ -305,7 +307,7 @@ test('admin async APIs expose task callback and queue status', async () => {
           provider_task_id: 'imgtask_1',
           client_task_id: 'task_1',
           request_id: 'req_1',
-          provider: 'new_api_internal',
+          provider: 'provider_direct_lease',
           model: 'gpt-image-2',
           operation: 'generation',
           status: 'succeeded',
@@ -314,13 +316,19 @@ test('admin async APIs expose task callback and queue status', async () => {
             output_format: 'png'
           },
           executor: {
-            type: 'new_api_internal',
-            execute_url: 'http://newapi-master:3000/api/internal/image/tasks/task_1/execute',
+            type: 'provider_direct_lease',
+            lease_id: 'lease_1',
+            resolve_url: 'http://newapi-master:3000/api/internal/image/credential-leases/lease_1/resolve',
             secret_id: 'image_handle_1'
           },
           metadata: {
             channel_id: 'channel_123'
           },
+          usage: {
+            total_tokens: 12
+          },
+          raw_response_truncated: true,
+          raw_response_omitted_fields: ['data[].b64_json'],
           attempts: 1,
           image_count: 1,
           first_image_url: 'https://img.example.com/images/test.png',

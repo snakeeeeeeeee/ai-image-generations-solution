@@ -12,13 +12,13 @@
   -> 共享 PostgreSQL
   -> 共享 Redis/BullMQ
   -> image-worker x M
-  -> new-api internal execute
+  -> new-api credential lease resolve
   -> R2
   -> image-notifier x K
   -> 回调通知 new-api
 ```
 
-API、任务处理进程、回调投递进程都是无状态进程。新机器只要运行同一个镜像，并使用同一套 `.env` 指向共享的 `POSTGRES_URL`、`REDIS_URL`、R2 和 new-api internal execute 配置，就可以加入处理。
+API、任务处理进程、回调投递进程都是无状态进程。新机器只要运行同一个镜像，并使用同一套 `.env` 指向共享的 `POSTGRES_URL`、`REDIS_URL`、R2 和 new-api credential lease 配置，就可以加入处理。
 
 PostgreSQL 是任务状态、结果 URL、错误和回调发件箱的事实库。Redis 只用于 BullMQ 队列、全局限速和短期协调。
 
@@ -51,8 +51,9 @@ Content-Type: application/json
     "output_compression": 85
   },
   "executor": {
-    "type": "new_api_internal",
-    "execute_url": "http://newapi-master:3000/api/internal/image/tasks/task_xxx/execute",
+    "type": "provider_direct_lease",
+    "lease_id": "lease_xxx",
+    "resolve_url": "http://newapi-master:3000/api/internal/image/credential-leases/lease_xxx/resolve",
     "secret_id": "image_handle_1"
   },
   "callback": {
@@ -102,7 +103,7 @@ failed
 
 任务处理进程在把任务推进到 `processing` 和终态时都使用 PostgreSQL CAS 更新，避免多台机器同时消费同一个 Redis 队列时重复执行同一任务。
 
-异步任务只支持 `executor.type = "new_api_internal"`。image-handle 不再维护真实上游密钥，也不根据模型自己选择渠道；worker 调用 `executor.execute_url`，由 new-api 使用已锁定的真实渠道完成生图或编辑图。同步 `/v1/images/generations`、`/v1/images/edits` 兼容接口保持原有上游转发逻辑。
+异步任务只支持 `executor.type = "provider_direct_lease"`。image-handle 不根据模型自己选择渠道；worker 调用 `executor.resolve_url` 领取短期凭证，再使用 new-api 已锁定的真实渠道直连上游完成生图或编辑图。同步 `/v1/images/generations`、`/v1/images/edits` 兼容接口保持原有上游转发逻辑。
 
 ## 回调协议
 

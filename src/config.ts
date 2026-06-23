@@ -67,8 +67,9 @@ export interface AsyncTaskConfig {
   callbackMaxRetryAgeHours: number;
   callbackDefaultSecret: string;
   callbackSecrets: Record<string, string>;
-  internalExecuteSecrets: Record<string, string>;
-  internalExecuteAllowedHosts: string[];
+  credentialLeaseSecrets: Record<string, string>;
+  credentialLeaseAllowedHosts: string[];
+  rawResponseMaxBytes: number;
   taskStaleProcessingTimeoutSeconds: number;
 }
 
@@ -255,8 +256,9 @@ export function loadConfig(): AppConfig {
       callbackMaxRetryAgeHours: parsePositiveInt('CALLBACK_MAX_RETRY_AGE_HOURS', 24),
       callbackDefaultSecret: optionalEnv('CALLBACK_DEFAULT_SECRET', ''),
       callbackSecrets: parseStringMapEnv('CALLBACK_SECRETS_JSON', '{}'),
-      internalExecuteSecrets: parseStringMapEnv('INTERNAL_EXECUTE_SECRETS_JSON', '{}'),
-      internalExecuteAllowedHosts: parseCsvEnv('INTERNAL_EXECUTE_ALLOWED_HOSTS', hostFromBaseUrl(normalizeBaseUrl(requireEnv('NEW_API_BASE_URL')))),
+      credentialLeaseSecrets: parseStringMapEnv('CREDENTIAL_LEASE_SECRETS_JSON', '{}'),
+      credentialLeaseAllowedHosts: parseCsvEnv('CREDENTIAL_LEASE_ALLOWED_HOSTS', hostFromBaseUrl(normalizeBaseUrl(requireEnv('NEW_API_BASE_URL')))),
+      rawResponseMaxBytes: parsePositiveInt('RAW_RESPONSE_MAX_BYTES', 256 * 1024),
       taskStaleProcessingTimeoutSeconds: parsePositiveInt('TASK_STALE_PROCESSING_TIMEOUT_SECONDS', 1800)
     }
   };

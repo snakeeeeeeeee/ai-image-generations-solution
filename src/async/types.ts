@@ -1,6 +1,6 @@
 export type AsyncTaskStatus = 'submitted' | 'queued' | 'processing' | 'succeeded' | 'failed';
 export type AsyncTaskOperation = 'generation' | 'edit';
-export const NEW_API_INTERNAL_EXECUTOR = 'new_api_internal';
+export const PROVIDER_DIRECT_LEASE_EXECUTOR = 'provider_direct_lease';
 
 export interface AsyncTaskInput {
   text?: string;
@@ -16,14 +16,15 @@ export interface AsyncTaskCallback {
   [key: string]: unknown;
 }
 
-export interface NewApiInternalExecutor {
-  type: typeof NEW_API_INTERNAL_EXECUTOR;
-  execute_url: string;
+export interface ProviderDirectLeaseExecutor {
+  type: typeof PROVIDER_DIRECT_LEASE_EXECUTOR;
+  lease_id: string;
+  resolve_url: string;
   secret_id: string;
   [key: string]: unknown;
 }
 
-export type AsyncTaskExecutor = NewApiInternalExecutor;
+export type AsyncTaskExecutor = ProviderDirectLeaseExecutor;
 
 export interface AsyncTaskRequest {
   request_id: string;
@@ -89,5 +90,5 @@ export interface CallbackEventRecord {
 }
 
 export interface TaskResultPayload {
-  images: Array<{ url: string }>;
+  images: Array<{ url: string; mime_type?: string }>;
 }

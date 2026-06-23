@@ -155,7 +155,8 @@ interface AsyncTaskRecord {
   provider: string;
   executor?: {
     type?: string;
-    execute_url?: string;
+    lease_id?: string;
+    resolve_url?: string;
     secret_id?: string;
   };
   model: string;
@@ -163,6 +164,9 @@ interface AsyncTaskRecord {
   status: 'submitted' | 'queued' | 'processing' | 'succeeded' | 'failed';
   parameters: Record<string, unknown>;
   metadata: Record<string, unknown>;
+  usage?: Record<string, unknown> | null;
+  raw_response_truncated?: boolean;
+  raw_response_omitted_fields?: string[];
   attempts: number;
   image_count: number;
   first_image_url?: string;
@@ -1034,7 +1038,7 @@ function AsyncTaskTable({ page, enabled, onPageChange, onPageSizeChange }: {
       <div className="panel-heading">
         <div>
           <h2>异步图片任务</h2>
-          <p>只展示执行状态和排障字段，不展示 prompt。</p>
+          <p>展示 direct lease 执行状态、R2 结果和安全版上游响应状态，不展示 prompt 和密钥。</p>
         </div>
       </div>
       <div className="table-scroll">
@@ -1045,9 +1049,12 @@ function AsyncTaskTable({ page, enabled, onPageChange, onPageSizeChange }: {
               <th>状态</th>
               <th>new-api 任务</th>
               <th>内部任务</th>
-              <th>执行器/模型</th>
+              <th>执行方式/模型</th>
+              <th>租约</th>
+              <th>渠道</th>
               <th>类型</th>
               <th>参数</th>
+              <th>用量/原始响应</th>
               <th>尝试</th>
               <th>图片</th>
               <th>错误</th>
@@ -1058,11 +1065,11 @@ function AsyncTaskTable({ page, enabled, onPageChange, onPageSizeChange }: {
           <tbody>
             {!enabled ? (
               <tr>
-                <td colSpan={12} className="table-empty">异步任务管理未启用</td>
+                <td colSpan={15} className="table-empty">异步任务管理未启用</td>
               </tr>
             ) : page.data.length === 0 ? (
               <tr>
-                <td colSpan={12} className="table-empty">暂无异步任务</td>
+                <td colSpan={15} className="table-empty">暂无异步任务</td>
               </tr>
             ) : page.data.map((task) => (
               <tr key={task.provider_task_id}>
@@ -1071,9 +1078,14 @@ function AsyncTaskTable({ page, enabled, onPageChange, onPageSizeChange }: {
                 <td className="id-cell">{task.client_task_id}</td>
                 <td className="id-cell">{task.provider_task_id}</td>
                 <td>{formatExecutorLabel(task)} / {task.model}</td>
+                <td className="id-cell">{formatLeaseId(task)}</td>
+                <td>{formatChannelId(task)}</td>
                 <td>{asyncOperationLabel(task.operation)}</td>
                 <td className="params-cell">
                   <span className="single-line">{formatAsyncTaskParams(task)}</span>
+                </td>
+                <td className="params-cell">
+                  <span className="single-line">{formatAsyncTaskUsage(task)}</span>
                 </td>
                 <td>{task.attempts}</td>
                 <td>{task.image_count}</td>
@@ -1600,11 +1612,7 @@ function formatResponseParamSummary(params: Record<string, unknown> | undefined)
 
 function formatAsyncTaskParams(task: AsyncTaskRecord): string {
   const parameterSummary = formatParamParts(task.parameters, ['size', 'quality', 'n', 'output_format', 'output_compression']);
-  const channelId = getScalarParam(task.metadata, 'channel_id');
-  if (channelId && parameterSummary !== '-') {
-    return `${parameterSummary} | channel:${channelId}`;
-  }
-  return channelId ? `channel:${channelId}` : parameterSummary;
+  return parameterSummary;
 }
 
 function formatTaskError(task: AsyncTaskRecord): string {
@@ -1618,7 +1626,28 @@ function formatTaskError(task: AsyncTaskRecord): string {
 }
 
 function formatExecutorLabel(task: AsyncTaskRecord): string {
+  if (task.executor?.type === 'provider_direct_lease') {
+    return '直连上游';
+  }
   return task.executor?.type || task.provider || '-';
+}
+
+function formatLeaseId(task: AsyncTaskRecord): string {
+  return task.executor?.lease_id || '-';
+}
+
+function formatChannelId(task: AsyncTaskRecord): string {
+  return getScalarParam(task.metadata, 'channel_id') || '-';
+}
+
+function formatAsyncTaskUsage(task: AsyncTaskRecord): string {
+  const totalTokens = getScalarParam(task.usage ?? undefined, 'total_tokens');
+  const actualQuota = getScalarParam(task.usage ?? undefined, 'actual_quota');
+  const usage = totalTokens ? `tokens:${totalTokens}` : actualQuota ? `quota:${actualQuota}` : 'usage:-';
+  const raw = task.raw_response_truncated
+    ? `raw:已清理${task.raw_response_omitted_fields?.length ? `(${task.raw_response_omitted_fields.length})` : ''}`
+    : 'raw:完整';
+  return `${usage} | ${raw}`;
 }
 
 function formatErrorSummary(request: RequestRecord): string {

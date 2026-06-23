@@ -2,6 +2,7 @@ import Fastify from 'fastify';
 
 const port = Number.parseInt(process.env.MOCK_NEW_API_PORT || '3999', 10);
 const host = process.env.MOCK_NEW_API_HOST || '127.0.0.1';
+const upstreamBaseUrl = (process.env.MOCK_UPSTREAM_BASE_URL || `http://127.0.0.1:${port}`).replace(/\/+$/, '');
 
 const app = Fastify({
   logger: true
@@ -56,10 +57,10 @@ app.post('/api/task/callback/external-image/:taskId', async (request) => {
   };
 });
 
-app.post('/api/internal/image/tasks/:taskId/execute', async (request) => {
-  const params = request.params as { taskId: string };
+app.post('/api/internal/image/credential-leases/:leaseId/resolve', async (request) => {
+  const params = request.params as { leaseId: string };
   request.log.info({
-    task_id: params.taskId,
+    lease_id: params.leaseId,
     headers: {
       secret_id: request.headers['x-imagehandle-secret-id'],
       event_id: request.headers['x-imagehandle-event-id'],
@@ -67,19 +68,60 @@ app.post('/api/internal/image/tasks/:taskId/execute', async (request) => {
       signature_present: Boolean(request.headers['x-imagehandle-signature'])
     },
     body: request.body
-  }, 'mock new-api 收到 internal execute 请求');
+  }, 'mock new-api 收到 credential lease resolve 请求');
 
   return {
-    status: 'succeeded',
-    images: [
+    provider: 'openai_compatible',
+    request_format: 'openai_images',
+    base_url: upstreamBaseUrl,
+    api_key: 'mock-upstream-key',
+    model: 'gpt-image-2',
+    channel_id: 'mock-channel',
+    expires_at: new Date(Date.now() + 10 * 60 * 1000).toISOString()
+  };
+});
+
+app.post('/images/generations', async (request) => {
+  request.log.info({
+    authorization_present: Boolean(request.headers.authorization),
+    body: request.body
+  }, 'mock 上游收到 direct lease 图片生成请求');
+
+  return {
+    id: `mock_${Date.now()}`,
+    created: Math.floor(Date.now() / 1000),
+    model: 'gpt-image-2',
+    usage: {
+      total_tokens: 0
+    },
+    data: [
       {
         b64_json: tinyPngBase64,
-        mime_type: 'image/png'
+        revised_prompt: 'mock revised prompt'
       }
-    ],
+    ]
+  };
+});
+
+app.post('/images/edits', async (request) => {
+  request.log.info({
+    authorization_present: Boolean(request.headers.authorization),
+    content_type: request.headers['content-type']
+  }, 'mock 上游收到 direct lease 图片编辑请求');
+
+  return {
+    id: `mock_edit_${Date.now()}`,
+    created: Math.floor(Date.now() / 1000),
+    model: 'gpt-image-2',
     usage: {
-      actual_quota: 0
-    }
+      total_tokens: 0
+    },
+    data: [
+      {
+        b64_json: tinyPngBase64,
+        revised_prompt: 'mock edited prompt'
+      }
+    ]
   };
 });
 

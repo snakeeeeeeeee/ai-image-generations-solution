@@ -9,7 +9,7 @@ import type {
   AsyncTaskStatus,
   CallbackEventRecord
 } from './types.js';
-import { NEW_API_INTERNAL_EXECUTOR } from './types.js';
+import { PROVIDER_DIRECT_LEASE_EXECUTOR } from './types.js';
 
 const { Pool } = pg;
 const MIGRATION_LOCK_ID = 2026062201;
@@ -84,6 +84,9 @@ export interface AdminAsyncTaskRecord {
   executor: AsyncTaskExecutor;
   parameters: Record<string, unknown>;
   metadata: Record<string, unknown>;
+  usage: Record<string, unknown> | null;
+  raw_response_truncated?: boolean;
+  raw_response_omitted_fields?: string[];
   attempts: number;
   image_count: number;
   first_image_url?: string;
@@ -240,7 +243,7 @@ export class AsyncTaskStore {
       request.client_task_id,
       request.request_id,
       keyHash,
-      NEW_API_INTERNAL_EXECUTOR,
+      PROVIDER_DIRECT_LEASE_EXECUTOR,
       request.model,
       request.operation,
       request.input ?? {},
@@ -668,6 +671,9 @@ function mapTaskRow(row: TaskRow): AsyncTaskRecord {
 function mapAdminTaskRow(row: TaskRow): AdminAsyncTaskRecord {
   const result = safeObject(row.result_json);
   const error = row.error_json ? safeObject(row.error_json) as unknown as AsyncTaskError : null;
+  const rawResponseOmittedFields = Array.isArray(result.raw_response_omitted_fields)
+    ? result.raw_response_omitted_fields.filter((item): item is string => typeof item === 'string')
+    : undefined;
   const images = Array.isArray(result.images) ? result.images : [];
   const firstImage = images.find((item): item is { url: string } => (
     item !== null &&
@@ -686,6 +692,9 @@ function mapAdminTaskRow(row: TaskRow): AdminAsyncTaskRecord {
     executor: safeObject(row.executor_json) as unknown as AsyncTaskExecutor,
     parameters: safeObject(row.parameters_json),
     metadata: safeObject(row.metadata_json),
+    usage: row.usage_json ? safeObject(row.usage_json) : null,
+    raw_response_truncated: typeof result.raw_response_truncated === 'boolean' ? result.raw_response_truncated : undefined,
+    raw_response_omitted_fields: rawResponseOmittedFields,
     attempts: row.attempts,
     image_count: images.length,
     first_image_url: firstImage?.url,

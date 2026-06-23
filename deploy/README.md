@@ -111,7 +111,7 @@ MOCK_NEW_API_HOST_PORT=3999
 ```bash
 cd deploy
 cp .env.prod.example .env
-# 填好真实镜像、R2、服务鉴权 key、回调密钥、上游配置，以及 PG/Redis 密码。
+# 填好真实镜像、R2、服务鉴权 key、回调密钥、credential lease 密钥，以及 PG/Redis 密码。
 ./image-handle.sh --env prod start full
 ```
 
@@ -123,6 +123,16 @@ NEW_API_BASE_URL=http://newapi-master:3000
 ```
 
 脚本检测到 `IMAGE_HANDLE_GATEWAY_NETWORK` 不为空时，会自动追加 `docker-compose.gateway.yml`。这样不需要改 new-api 的 `127.0.0.1:3000->3000` 端口绑定，也不依赖 Docker 网关 IP。
+
+异步任务使用 `provider_direct_lease`，worker 会按任务里的 `executor.resolve_url` 向 new-api 领取短期上游凭证。生产环境需要配置：
+
+```env
+CREDENTIAL_LEASE_SECRETS_JSON={"image_handle_1":"<credential lease 验签密钥>"}
+CREDENTIAL_LEASE_ALLOWED_HOSTS=newapi-master:3000
+RAW_RESPONSE_MAX_BYTES=262144
+```
+
+`UPSTREAM_API_KEY` 只影响旧同步兼容接口，不参与异步 direct lease 执行。
 
 主节点自带 PG/Redis 时，`.env` 里的连接串保持容器内服务名：
 

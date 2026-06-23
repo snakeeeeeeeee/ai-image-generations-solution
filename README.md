@@ -110,8 +110,9 @@ curl http://127.0.0.1:8787/v1/image/tasks \
       "output_format": "png"
     },
     "executor": {
-      "type": "new_api_internal",
-      "execute_url": "http://mock-new-api:3999/api/internal/image/tasks/task_local_1/execute",
+      "type": "provider_direct_lease",
+      "lease_id": "lease_task_local_1",
+      "resolve_url": "http://mock-new-api:3999/api/internal/image/credential-leases/lease_task_local_1/resolve",
       "secret_id": "image_handle_1"
     },
     "callback": {
@@ -147,8 +148,9 @@ curl http://127.0.0.1:8787/v1/image/tasks \
       "output_format": "png"
     },
     "executor": {
-      "type": "new_api_internal",
-      "execute_url": "http://mock-new-api:3999/api/internal/image/tasks/task_edit_1/execute",
+      "type": "provider_direct_lease",
+      "lease_id": "lease_task_edit_1",
+      "resolve_url": "http://mock-new-api:3999/api/internal/image/credential-leases/lease_task_edit_1/resolve",
       "secret_id": "image_handle_1"
     }
   }'
@@ -170,7 +172,7 @@ curl http://127.0.0.1:8787/v1/image/tasks/query \
   -d '{"task_ids":["imgtask_xxx"]}'
 ```
 
-异步任务的事实库是 PostgreSQL。Redis 用于 BullMQ 队列、分布式限速、重试和短期协调。异步 worker 不维护真实上游密钥，而是通过 `executor.execute_url` 调 new-api internal execute，由 new-api 使用已锁定渠道完成真实上游调用。
+异步任务的事实库是 PostgreSQL。Redis 用于 BullMQ 队列、分布式限速、重试和短期协调。异步 worker 不维护长期上游密钥，而是通过 `executor.resolve_url` 向 new-api 领取短期 credential lease，再直连 OpenAI-compatible 上游执行并上传 R2。
 
 ## Docker Compose 部署
 

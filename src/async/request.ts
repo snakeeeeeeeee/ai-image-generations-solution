@@ -1,5 +1,5 @@
 import { AppError } from '../errors.js';
-import { NEW_API_INTERNAL_EXECUTOR } from './types.js';
+import { PROVIDER_DIRECT_LEASE_EXECUTOR } from './types.js';
 import type { AsyncTaskExecutor, AsyncTaskRequest } from './types.js';
 
 const SUPPORTED_OPERATIONS = new Set(['generation', 'edit']);
@@ -118,44 +118,46 @@ function getOptionalObject(value: unknown, name: string): Record<string, unknown
 function parseExecutor(value: unknown): AsyncTaskExecutor {
   const executor = getObject(value, 'executor');
   const type = executor.type;
-  if (type !== NEW_API_INTERNAL_EXECUTOR) {
-    throw new AppError('executor.type must be new_api_internal', {
+  if (type !== PROVIDER_DIRECT_LEASE_EXECUTOR) {
+    throw new AppError('executor.type must be provider_direct_lease', {
       statusCode: 400,
       type: 'invalid_request_error',
       code: 'unsupported_executor'
     });
   }
 
-  const executeUrl = requireString(executor, 'execute_url');
+  const leaseId = requireString(executor, 'lease_id');
+  const resolveUrl = requireString(executor, 'resolve_url');
   const secretId = requireString(executor, 'secret_id');
-  validateExecuteUrl(executeUrl);
+  validateResolveUrl(resolveUrl);
 
   return {
     ...executor,
-    type: NEW_API_INTERNAL_EXECUTOR,
-    execute_url: executeUrl,
+    type: PROVIDER_DIRECT_LEASE_EXECUTOR,
+    lease_id: leaseId,
+    resolve_url: resolveUrl,
     secret_id: secretId
   };
 }
 
-function validateExecuteUrl(value: string): void {
+function validateResolveUrl(value: string): void {
   let url: URL;
   try {
     url = new URL(value);
   } catch (error) {
-    throw new AppError('executor.execute_url must be a valid URL', {
+    throw new AppError('executor.resolve_url must be a valid URL', {
       statusCode: 400,
       type: 'invalid_request_error',
-      code: 'invalid_execute_url',
+      code: 'invalid_resolve_url',
       cause: error
     });
   }
 
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-    throw new AppError('executor.execute_url protocol is unsupported', {
+    throw new AppError('executor.resolve_url protocol is unsupported', {
       statusCode: 400,
       type: 'invalid_request_error',
-      code: 'invalid_execute_url'
+      code: 'invalid_resolve_url'
     });
   }
 }

@@ -40,7 +40,7 @@ export interface RunnerTimings {
 
 export interface ImageExecutionResult {
   created: number;
-  data: Array<{ url: string }>;
+  data: Array<{ url: string; mime_type?: string }>;
   outputImages: Array<ImageMetadata & { sourceType: ImageSourceType }>;
   responseParams: Record<string, unknown>;
   requestParams: Record<string, unknown>;
@@ -52,13 +52,14 @@ export interface ImageExecutionResult {
   imageBytes: number;
   imageCount: number;
   imageUrls: string[];
+  upstreamResponse: UpstreamImageResponse;
 }
 
 export type UploadImageToR2 = typeof uploadImageToR2;
 export type ImageOperation = 'generation' | 'edit';
 export type UpstreamDispatcher = Agent;
 
-interface UpstreamRequestPayload {
+export interface UpstreamRequestPayload {
   body: string | FormData;
   headers: Record<string, string>;
   strategy: ImageModelStrategy;
@@ -489,7 +490,7 @@ export async function executeUpstreamPayload({
   }));
   timings.openai_ms = msSince(upstreamStartedAt);
 
-  const outputData: Array<{ url: string }> = [];
+  const outputData: Array<{ url: string; mime_type?: string }> = [];
   const outputImages: Array<ImageMetadata & { sourceType: ImageSourceType }> = [];
   const imageSources = payload.strategy.extractImages(upstreamResponse);
   if (imageSources.length === 0) {
@@ -526,7 +527,8 @@ export async function executeUpstreamPayload({
     timings,
     imageBytes: totalImageBytes,
     imageCount: outputData.length,
-    imageUrls
+    imageUrls,
+    upstreamResponse
   };
 }
 
@@ -538,12 +540,12 @@ export async function uploadImageSources({
   r2Client,
   upload = uploadImageToR2
 }: UploadImageSourcesOptions): Promise<{
-  data: Array<{ url: string }>;
+  data: Array<{ url: string; mime_type?: string }>;
   outputImages: Array<ImageMetadata & { sourceType: ImageSourceType }>;
   timings: Pick<RunnerTimings, 'decode_ms' | 'upload_ms'>;
   imageBytes: number;
 }> {
-  const outputData: Array<{ url: string }> = [];
+  const outputData: Array<{ url: string; mime_type?: string }> = [];
   const outputImages: Array<ImageMetadata & { sourceType: ImageSourceType }> = [];
   const timings = {
     decode_ms: 0,
@@ -586,7 +588,7 @@ export async function uploadImageSources({
       contentType: imageMetadata.mimeType
     });
     timings.upload_ms += msSince(uploadStartedAt);
-    outputData.push({ url });
+    outputData.push({ url, mime_type: imageMetadata.mimeType });
   }
 
   return {
