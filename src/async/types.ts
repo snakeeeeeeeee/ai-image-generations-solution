@@ -1,5 +1,6 @@
 export type AsyncTaskStatus = 'submitted' | 'queued' | 'processing' | 'succeeded' | 'failed';
 export type AsyncTaskOperation = 'generation' | 'edit';
+export type ResultDataFormat = 'url' | 'base64';
 export const PROVIDER_DIRECT_LEASE_EXECUTOR = 'provider_direct_lease';
 
 export interface AsyncTaskInput {
@@ -31,6 +32,7 @@ export interface AsyncTaskRequest {
   client_task_id: string;
   model: string;
   operation: AsyncTaskOperation;
+  result_data_format: ResultDataFormat;
   input: AsyncTaskInput;
   parameters?: Record<string, unknown>;
   executor: AsyncTaskExecutor;
@@ -67,6 +69,12 @@ export interface AsyncTaskError {
   code: string;
   message: string;
   retryable?: boolean;
+  upstream_status?: number;
+  provider_error_code?: string;
+  provider_error_type?: string;
+  provider_error_message?: string;
+  provider_error_param?: string;
+  upstream_error?: unknown;
 }
 
 export interface TaskQueuePayload {
@@ -91,4 +99,8 @@ export interface CallbackEventRecord {
 
 export interface TaskResultPayload {
   images: Array<{ url: string; mime_type?: string }>;
+}
+
+export interface Base64TaskResultPayload {
+  images: Array<{ b64_json: string; mime_type?: string }>;
 }

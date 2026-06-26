@@ -833,14 +833,16 @@ export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyIn
     maxUploadBytes: config.bodyLimitBytes,
     uploadImage: (file, request) => handleAdminImageUpload(file, request),
     asyncTaskStore: asyncStore,
-    taskQueue: queueClients?.taskQueue
+    taskQueue: queueClients?.taskQueue,
+    asyncRedisConnection: queueClients?.connection
   });
 
   if (asyncStore && queueClients) {
     registerAsyncTaskRoutes(app, {
       config,
       store: asyncStore,
-      taskQueue: queueClients.taskQueue
+      taskQueue: queueClients.taskQueue,
+      base64ResultRedis: queueClients.connection
     });
   }
 

@@ -2,12 +2,14 @@ import { createHmac, randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { Agent, fetch as undiciFetch } from 'undici';
 import type { Job, Queue, Worker } from 'bullmq';
+import type { Redis } from 'ioredis';
 import type { AppConfig } from '../config.js';
 import { createR2Client } from '../r2.js';
 import { ActiveRequestLimiter } from '../limiter.js';
 import { createImageTaskWorker, createRedisConnection, enqueueImageTask, RedisRateLimiter } from './queue.js';
 import type { AsyncTaskStore } from './store.js';
 import type { AsyncTaskError, AsyncTaskRecord, TaskQueuePayload } from './types.js';
+import { extractBase64TaskResult, isBase64ResultRequested, writeBase64TaskResult } from './base64-result.js';
 import { executeUpstreamPayload } from '../image-runner.js';
 import type { ImageOperation, UploadImageToR2, UpstreamDispatcher, UpstreamRequestPayload } from '../image-runner.js';
 import { AppError } from '../errors.js';
@@ -16,6 +18,15 @@ import { uploadImageToR2 } from '../r2.js';
 import { genericOpenAICompatibleStrategy } from '../image-strategy.js';
 import { loadImageSource } from '../image-runner.js';
 import { sanitizeRawResponse } from './raw-response.js';
+import {
+  createWorkerRuntimeState,
+  removeWorkerHeartbeat,
+  trackWorkerTaskFinish,
+  trackWorkerTaskRetry,
+  trackWorkerTaskStart,
+  writeWorkerHeartbeat,
+  type WorkerRuntimeState
+} from './worker-heartbeat.js';
 
 const MAX_DIRECT_EXECUTE_ATTEMPTS = 3;
 const SUPPORTED_PROVIDER = 'openai_compatible';
@@ -40,6 +51,7 @@ interface DirectExecuteResult {
   data: Array<{ url: string; mime_type?: string }>;
   usage: Record<string, unknown>;
   rawResponse: unknown;
+  upstreamResponse: unknown;
 }
 
 export function startAsyncWorker({
@@ -59,6 +71,11 @@ export function startAsyncWorker({
   const redis = createRedisConnection(config.asyncTasks.redisUrl);
   const rateLimiter = new RedisRateLimiter(redis, config);
   const imageProcessingLimiter = new ActiveRequestLimiter(config.asyncTasks.imageProcessingConcurrency);
+  const runtimeState = createWorkerRuntimeState();
+
+  void writeWorkerHeartbeat({ redis, config, state: runtimeState }).catch((error) => {
+    console.error('worker heartbeat write failed', error);
+  });
 
   const worker = createImageTaskWorker(config, async (job: Job<TaskQueuePayload>) => {
     await processTask({
@@ -69,7 +86,9 @@ export function startAsyncWorker({
       rateLimiter,
       imageProcessingLimiter,
       upstreamDispatcher,
-      r2Client
+      r2Client,
+      base64ResultRedis: redis,
+      runtimeState
     });
   });
 
@@ -79,11 +98,19 @@ export function startAsyncWorker({
     });
   }, 60_000);
   recoveryInterval.unref();
+  const heartbeatInterval = setInterval(() => {
+    void writeWorkerHeartbeat({ redis, config, state: runtimeState }).catch((error) => {
+      worker.emit('error', error instanceof Error ? error : new Error(String(error)));
+    });
+  }, config.asyncTasks.workerHeartbeatIntervalMs);
+  heartbeatInterval.unref();
 
   return {
     worker,
     close: async () => {
       clearInterval(recoveryInterval);
+      clearInterval(heartbeatInterval);
+      await removeWorkerHeartbeat(redis, runtimeState.workerId).catch(() => undefined);
       await worker.close();
       redis.disconnect();
       await upstreamDispatcher.close();
@@ -101,6 +128,8 @@ export async function processTask({
   imageProcessingLimiter,
   upstreamDispatcher,
   r2Client,
+  base64ResultRedis,
+  runtimeState,
   upload = uploadImageToR2
 }: {
   job: Job<TaskQueuePayload>;
@@ -111,12 +140,15 @@ export async function processTask({
   imageProcessingLimiter: ActiveRequestLimiter;
   upstreamDispatcher: Agent;
   r2Client: ReturnType<typeof createR2Client>;
+  base64ResultRedis?: Redis;
+  runtimeState?: WorkerRuntimeState;
   upload?: UploadImageToR2;
 }): Promise<void> {
   const claimed = await store.claimTask(job.data.provider_task_id);
   if (!claimed) {
     return;
   }
+  runtimeState ? trackWorkerTaskStart(runtimeState, claimed) : undefined;
 
   try {
     const lease = await resolveCredentialLease({ task: claimed, config, dispatcher: upstreamDispatcher });
@@ -149,6 +181,13 @@ export async function processTask({
       };
       const usagePayload = result.usage;
       const safeRaw = sanitizeRawResponse(result.rawResponse, config.asyncTasks.rawResponseMaxBytes);
+      if (isBase64ResultRequested(claimed)) {
+        await writeBase64TaskResult(
+          base64ResultRedis,
+          claimed.provider_task_id,
+          extractBase64TaskResult(result.upstreamResponse)
+        );
+      }
       const callbackPayload = buildCallbackPayload({
         task: claimed,
         status: 'succeeded',
@@ -171,6 +210,7 @@ export async function processTask({
         error: null,
         callbackPayload
       });
+      runtimeState ? trackWorkerTaskFinish(runtimeState, claimed.provider_task_id, 'succeeded') : undefined;
     } finally {
       releaseImageProcessing();
     }
@@ -184,6 +224,7 @@ export async function processTask({
           delay: delayMs,
           jobId: `${claimed.provider_task_id}:retry:${claimed.attempts}`
         });
+        runtimeState ? trackWorkerTaskRetry(runtimeState, claimed.provider_task_id, taskError.code) : undefined;
         return;
       }
     }
@@ -192,7 +233,11 @@ export async function processTask({
     await store.completeTask({
       providerTaskId: claimed.provider_task_id,
       status: 'failed',
-      result: null,
+      result: {
+        raw_response: safeRaw.raw_response,
+        raw_response_truncated: safeRaw.raw_response_truncated,
+        raw_response_omitted_fields: safeRaw.raw_response_omitted_fields
+      },
       usage: null,
       error: taskError,
       callbackPayload: buildCallbackPayload({
@@ -204,6 +249,7 @@ export async function processTask({
         rawResponse: safeRaw
       })
     });
+    runtimeState ? trackWorkerTaskFinish(runtimeState, claimed.provider_task_id, 'failed', taskError.code) : undefined;
   }
 }
 
@@ -244,6 +290,7 @@ function buildCallbackPayload({
     provider_task_id: task.provider_task_id,
     status,
     progress: '100%',
+    result_data_format: 'url',
     result,
     usage,
     error,
@@ -293,7 +340,8 @@ async function executeDirectLeaseTask({
   return {
     data: execution.data,
     usage: safeObject(execution.upstreamResponse.usage),
-    rawResponse: rewriteRawResponseImages(execution.upstreamResponse, execution.data)
+    rawResponse: rewriteRawResponseImages(execution.upstreamResponse, execution.data),
+    upstreamResponse: execution.upstreamResponse
   };
 }
 
@@ -623,9 +671,9 @@ function leaseFailureToError(value: unknown, statusCode: number, elapsedMs: numb
 }
 
 function extractCauseBody(error: unknown): unknown {
-  if (error instanceof AppError && error.cause && typeof error.cause === 'object') {
-    const cause = error.cause as { body?: unknown };
-    return cause.body ?? error.cause;
+  if (error instanceof AppError) {
+    const cause = safeObject(error.cause);
+    return cause.body ?? cause.upstream_error ?? error.cause ?? null;
   }
   return null;
 }
@@ -663,14 +711,16 @@ function retryDelayMs(attempt: number): number {
 
 function toTaskError(error: unknown): AsyncTaskError {
   if (error instanceof AppError) {
-    const cause = error.cause as { retryable?: unknown } | undefined;
-    const hasRetryableDecision = cause && typeof cause.retryable === 'boolean';
+    const cause = safeObject(error.cause);
+    const upstream = getUpstreamErrorDetails(error);
+    const hasRetryableDecision = typeof cause.retryable === 'boolean';
     return {
       code: error.code,
-      message: error.message,
+      message: upstream.provider_error_message ?? error.message,
       retryable: hasRetryableDecision
         ? cause.retryable === true
-        : error.statusCode >= 500 || error.statusCode === 429
+        : error.statusCode >= 500 || error.statusCode === 429,
+      ...upstream
     };
   }
 
@@ -679,4 +729,40 @@ function toTaskError(error: unknown): AsyncTaskError {
     message: error instanceof Error ? error.message : String(error),
     retryable: false
   };
+}
+
+function getUpstreamErrorDetails(error: AppError): Partial<AsyncTaskError> {
+  const cause = safeObject(error.cause);
+  const body = safeObject(cause.body ?? cause.upstream_error ?? error.cause);
+  const nested = safeObject(body.error);
+  const source = Object.keys(nested).length > 0 ? nested : body;
+  const upstreamStatus = getNumber(cause.status_code) ?? error.statusCode;
+  const providerMessage =
+    getString(source.message) ??
+    getString(body.message) ??
+    (typeof cause.body === 'string' ? cause.body : undefined);
+  const providerCode =
+    getString(source.code) ??
+    getString(body.code) ??
+    getString(source.type) ??
+    getString(body.type);
+  const providerType =
+    getString(source.type) ??
+    getString(body.type);
+  const providerParam =
+    getString(source.param) ??
+    getString(body.param);
+
+  return {
+    upstream_status: upstreamStatus,
+    provider_error_code: providerCode,
+    provider_error_type: providerType,
+    provider_error_message: providerMessage,
+    provider_error_param: providerParam,
+    upstream_error: Object.keys(body).length > 0 ? body : undefined
+  };
+}
+
+function getNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 }

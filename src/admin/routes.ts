@@ -10,6 +10,8 @@ import { AppError, sendAppError } from '../errors.js';
 import type { AsyncTaskStore } from '../async/store.js';
 import type { Queue } from 'bullmq';
 import type { TaskQueuePayload } from '../async/types.js';
+import type { Redis } from 'ioredis';
+import { readWorkerHeartbeats, type WorkerHeartbeat } from '../async/worker-heartbeat.js';
 
 interface AdminRoutesOptions {
   config: AdminConfig;
@@ -19,6 +21,7 @@ interface AdminRoutesOptions {
   uploadImage?: AdminUploadHandler;
   asyncTaskStore?: AsyncTaskStore;
   taskQueue?: Queue<TaskQueuePayload>;
+  asyncRedisConnection?: Redis;
 }
 
 interface LoginBody {
@@ -209,21 +212,24 @@ export function registerAdminRoutes(app: FastifyInstance, options: AdminRoutesOp
         enabled: false,
         tasks: emptyTaskSummary(),
         callbacks: emptyCallbackSummary(),
-        queue: null
+        queue: null,
+        workers: emptyWorkerSummary()
       });
     }
 
-    const [tasks, callbacks, queue] = await Promise.all([
+    const [tasks, callbacks, queue, workers] = await Promise.all([
       options.asyncTaskStore.getAdminTaskSummary(),
       options.asyncTaskStore.getAdminCallbackSummary(),
-      getQueueStats(options.taskQueue)
+      getQueueStats(options.taskQueue),
+      getWorkerSummary(options.asyncRedisConnection)
     ]);
 
     return {
       enabled: true,
       tasks,
       callbacks,
-      queue
+      queue,
+      workers
     };
   });
 
@@ -293,6 +299,35 @@ function emptyCallbackSummary() {
     processing: 0,
     delivered: 0,
     failed: 0
+  };
+}
+
+function emptyWorkerSummary() {
+  return {
+    total: 0,
+    active_tasks: 0,
+    worker_concurrency: 0,
+    image_processing_concurrency: 0,
+    completed_since_start: 0,
+    failed_since_start: 0,
+    data: [] as WorkerHeartbeat[]
+  };
+}
+
+async function getWorkerSummary(redis: Redis | undefined) {
+  if (!redis) {
+    return emptyWorkerSummary();
+  }
+
+  const workers = await readWorkerHeartbeats(redis);
+  return {
+    total: workers.length,
+    active_tasks: workers.reduce((total, worker) => total + worker.active_tasks, 0),
+    worker_concurrency: workers.reduce((total, worker) => total + worker.worker_concurrency, 0),
+    image_processing_concurrency: workers.reduce((total, worker) => total + worker.image_processing_concurrency, 0),
+    completed_since_start: workers.reduce((total, worker) => total + worker.completed_since_start, 0),
+    failed_since_start: workers.reduce((total, worker) => total + worker.failed_since_start, 0),
+    data: workers
   };
 }
 

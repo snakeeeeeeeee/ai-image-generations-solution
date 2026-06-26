@@ -333,7 +333,11 @@ export async function parseUpstreamResponse(response: Response, debug?: Upstream
       statusCode: response.status,
       type: 'upstream_error',
       code: 'new_api_error',
-      cause: responseBody
+      cause: {
+        status_code: response.status,
+        status_text: response.statusText,
+        body: responseBody
+      }
     });
   }
 

@@ -83,6 +83,11 @@ function buildTestConfig(baseUrl: string, overrides: DeepPartial<AppConfig> = {}
       credentialLeaseSecrets: {},
       credentialLeaseAllowedHosts: ['127.0.0.1:1'],
       rawResponseMaxBytes: 256 * 1024,
+      syncTaskTimeoutMs: 5 * 60 * 1000,
+      syncTaskPollIntervalMs: 500,
+      syncWaitConcurrency: 200,
+      workerHeartbeatIntervalMs: 5000,
+      workerHeartbeatTtlSeconds: 15,
       taskStaleProcessingTimeoutSeconds: 1800
     }
   };
@@ -134,6 +139,11 @@ function buildTestConfig(baseUrl: string, overrides: DeepPartial<AppConfig> = {}
       credentialLeaseSecrets: base.asyncTasks.credentialLeaseSecrets,
       credentialLeaseAllowedHosts: base.asyncTasks.credentialLeaseAllowedHosts,
       rawResponseMaxBytes: overrides.asyncTasks?.rawResponseMaxBytes ?? base.asyncTasks.rawResponseMaxBytes,
+      syncTaskTimeoutMs: overrides.asyncTasks?.syncTaskTimeoutMs ?? base.asyncTasks.syncTaskTimeoutMs,
+      syncTaskPollIntervalMs: overrides.asyncTasks?.syncTaskPollIntervalMs ?? base.asyncTasks.syncTaskPollIntervalMs,
+      syncWaitConcurrency: overrides.asyncTasks?.syncWaitConcurrency ?? base.asyncTasks.syncWaitConcurrency,
+      workerHeartbeatIntervalMs: overrides.asyncTasks?.workerHeartbeatIntervalMs ?? base.asyncTasks.workerHeartbeatIntervalMs,
+      workerHeartbeatTtlSeconds: overrides.asyncTasks?.workerHeartbeatTtlSeconds ?? base.asyncTasks.workerHeartbeatTtlSeconds,
       taskStaleProcessingTimeoutSeconds: overrides.asyncTasks?.taskStaleProcessingTimeoutSeconds ?? base.asyncTasks.taskStaleProcessingTimeoutSeconds
     }
   };

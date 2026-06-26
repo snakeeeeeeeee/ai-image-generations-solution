@@ -86,6 +86,11 @@ function buildTestConfig(baseUrl: string, overrides: DeepPartial<AppConfig> = {}
       credentialLeaseSecrets: {},
       credentialLeaseAllowedHosts: ['127.0.0.1:1'],
       rawResponseMaxBytes: 256 * 1024,
+      syncTaskTimeoutMs: 5 * 60 * 1000,
+      syncTaskPollIntervalMs: 500,
+      syncWaitConcurrency: 200,
+      workerHeartbeatIntervalMs: 5000,
+      workerHeartbeatTtlSeconds: 15,
       taskStaleProcessingTimeoutSeconds: 1800
     }
   };
@@ -137,6 +142,11 @@ function buildTestConfig(baseUrl: string, overrides: DeepPartial<AppConfig> = {}
       credentialLeaseSecrets: base.asyncTasks.credentialLeaseSecrets,
       credentialLeaseAllowedHosts: base.asyncTasks.credentialLeaseAllowedHosts,
       rawResponseMaxBytes: overrides.asyncTasks?.rawResponseMaxBytes ?? base.asyncTasks.rawResponseMaxBytes,
+      syncTaskTimeoutMs: overrides.asyncTasks?.syncTaskTimeoutMs ?? base.asyncTasks.syncTaskTimeoutMs,
+      syncTaskPollIntervalMs: overrides.asyncTasks?.syncTaskPollIntervalMs ?? base.asyncTasks.syncTaskPollIntervalMs,
+      syncWaitConcurrency: overrides.asyncTasks?.syncWaitConcurrency ?? base.asyncTasks.syncWaitConcurrency,
+      workerHeartbeatIntervalMs: overrides.asyncTasks?.workerHeartbeatIntervalMs ?? base.asyncTasks.workerHeartbeatIntervalMs,
+      workerHeartbeatTtlSeconds: overrides.asyncTasks?.workerHeartbeatTtlSeconds ?? base.asyncTasks.workerHeartbeatTtlSeconds,
       taskStaleProcessingTimeoutSeconds: overrides.asyncTasks?.taskStaleProcessingTimeoutSeconds ?? base.asyncTasks.taskStaleProcessingTimeoutSeconds
     }
   };
@@ -366,6 +376,39 @@ test('admin async APIs expose task callback and queue status', async () => {
     })
   } as unknown as AsyncTaskStore;
   const fakeQueueClients = {
+    connection: {
+      scan: async (cursor: string) => cursor === '0'
+        ? ['0', ['image:runtime:worker:worker_1']]
+        : ['0', []],
+      mget: async () => [
+        JSON.stringify({
+          worker_id: 'worker_1',
+          role: 'worker',
+          hostname: 'node-1',
+          ip_addresses: ['172.24.0.8'],
+          pid: 123,
+          started_at: '2026-06-22T01:00:00.000Z',
+          last_seen_at: '2026-06-22T01:02:00.000Z',
+          worker_concurrency: 20,
+          image_processing_concurrency: 10,
+          active_tasks: 1,
+          completed_since_start: 7,
+          failed_since_start: 1,
+          rss_bytes: 123456789,
+          heap_used_bytes: 23456789,
+          last_error_code: 'upstream_error',
+          current_tasks: [
+            {
+              client_task_id: 'task_2',
+              provider_task_id: 'imgtask_2',
+              operation: 'generation',
+              model: 'gpt-image-2',
+              started_at: '2026-06-22T01:01:30.000Z'
+            }
+          ]
+        })
+      ]
+    },
     taskQueue: {
       getJobCounts: async () => ({
         waiting: 3,
@@ -405,6 +448,10 @@ test('admin async APIs expose task callback and queue status', async () => {
   assert.equal(summary.json().callbacks.pending, 1);
   assert.equal(summary.json().queue.waiting, 3);
   assert.equal(summary.json().queue.failed, 1);
+  assert.equal(summary.json().workers.total, 1);
+  assert.equal(summary.json().workers.active_tasks, 1);
+  assert.equal(summary.json().workers.image_processing_concurrency, 10);
+  assert.equal(summary.json().workers.data[0].current_tasks[0].client_task_id, 'task_2');
 
   const tasks = await app.inject({
     method: 'GET',

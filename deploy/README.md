@@ -130,9 +130,16 @@ NEW_API_BASE_URL=http://newapi-master:3000
 CREDENTIAL_LEASE_SECRETS_JSON={"image_handle_1":"<credential lease 验签密钥>"}
 CREDENTIAL_LEASE_ALLOWED_HOSTS=newapi-master:3000
 RAW_RESPONSE_MAX_BYTES=262144
+SYNC_TASK_TIMEOUT_MS=300000
+SYNC_TASK_POLL_INTERVAL_MS=500
+SYNC_WAIT_CONCURRENCY=200
+WORKER_HEARTBEAT_INTERVAL_MS=5000
+WORKER_HEARTBEAT_TTL_SECONDS=15
 ```
 
-`UPSTREAM_API_KEY` 只影响旧同步兼容接口，不参与异步 direct lease 执行。
+`/v1/image/tasks/sync` 是同步等待包装接口，任务仍由 worker 执行；超过 `SYNC_TASK_TIMEOUT_MS` 后接口返回当前状态，后台任务继续执行。`UPSTREAM_API_KEY` 只影响旧同步兼容接口，不参与异步 direct lease 执行。
+
+worker 会按 `WORKER_HEARTBEAT_INTERVAL_MS` 写 Redis 心跳，心跳 key 过期时间由 `WORKER_HEARTBEAT_TTL_SECONDS` 控制；管理台的任务队列页会据此展示在线 worker、当前任务和每个节点的简单计数。
 
 主节点自带 PG/Redis 时，`.env` 里的连接串保持容器内服务名：
 

@@ -70,6 +70,11 @@ export interface AsyncTaskConfig {
   credentialLeaseSecrets: Record<string, string>;
   credentialLeaseAllowedHosts: string[];
   rawResponseMaxBytes: number;
+  syncTaskTimeoutMs: number;
+  syncTaskPollIntervalMs: number;
+  syncWaitConcurrency: number;
+  workerHeartbeatIntervalMs: number;
+  workerHeartbeatTtlSeconds: number;
   taskStaleProcessingTimeoutSeconds: number;
 }
 
@@ -259,6 +264,11 @@ export function loadConfig(): AppConfig {
       credentialLeaseSecrets: parseStringMapEnv('CREDENTIAL_LEASE_SECRETS_JSON', '{}'),
       credentialLeaseAllowedHosts: parseCsvEnv('CREDENTIAL_LEASE_ALLOWED_HOSTS', hostFromBaseUrl(normalizeBaseUrl(requireEnv('NEW_API_BASE_URL')))),
       rawResponseMaxBytes: parsePositiveInt('RAW_RESPONSE_MAX_BYTES', 256 * 1024),
+      syncTaskTimeoutMs: parsePositiveInt('SYNC_TASK_TIMEOUT_MS', 5 * 60 * 1000),
+      syncTaskPollIntervalMs: parsePositiveInt('SYNC_TASK_POLL_INTERVAL_MS', 500),
+      syncWaitConcurrency: parsePositiveInt('SYNC_WAIT_CONCURRENCY', 200),
+      workerHeartbeatIntervalMs: parsePositiveInt('WORKER_HEARTBEAT_INTERVAL_MS', 5000),
+      workerHeartbeatTtlSeconds: parsePositiveInt('WORKER_HEARTBEAT_TTL_SECONDS', 15),
       taskStaleProcessingTimeoutSeconds: parsePositiveInt('TASK_STALE_PROCESSING_TIMEOUT_SECONDS', 1800)
     }
   };

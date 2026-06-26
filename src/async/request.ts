@@ -1,6 +1,6 @@
 import { AppError } from '../errors.js';
 import { PROVIDER_DIRECT_LEASE_EXECUTOR } from './types.js';
-import type { AsyncTaskExecutor, AsyncTaskRequest } from './types.js';
+import type { AsyncTaskExecutor, AsyncTaskRequest, ResultDataFormat } from './types.js';
 
 const SUPPORTED_OPERATIONS = new Set(['generation', 'edit']);
 
@@ -50,6 +50,7 @@ export function normalizeAsyncTaskRequest(body: unknown): AsyncTaskRequest {
   const clientTaskId = requireString(value, 'client_task_id');
   const model = requireString(value, 'model');
   const operation = requireString(value, 'operation');
+  const resultDataFormat = parseResultDataFormat(value.result_data_format);
   if (!SUPPORTED_OPERATIONS.has(operation)) {
     throw new AppError('Unsupported image task operation', {
       statusCode: 400,
@@ -77,12 +78,29 @@ export function normalizeAsyncTaskRequest(body: unknown): AsyncTaskRequest {
     client_task_id: clientTaskId,
     model,
     operation: operation as AsyncTaskRequest['operation'],
+    result_data_format: resultDataFormat,
     input,
     parameters,
     executor,
     callback,
     metadata
   };
+}
+
+export function parseResultDataFormat(value: unknown): ResultDataFormat {
+  if (value === undefined || value === null || value === '') {
+    return 'url';
+  }
+
+  if (value === 'url' || value === 'base64') {
+    return value;
+  }
+
+  throw new AppError('result_data_format must be url or base64', {
+    statusCode: 400,
+    type: 'invalid_request_error',
+    code: 'invalid_result_data_format'
+  });
 }
 
 function requireString(value: Record<string, unknown>, key: string): string {

@@ -19,6 +19,7 @@ import {
   RefreshCw,
   Send,
   Server,
+  Cpu,
   UploadCloud,
   X,
   XCircle
@@ -141,11 +142,49 @@ interface QueueStats {
   paused: number;
 }
 
+interface WorkerCurrentTask {
+  client_task_id: string;
+  provider_task_id: string;
+  operation: 'generation' | 'edit' | string;
+  model: string;
+  started_at: string;
+}
+
+interface WorkerHeartbeat {
+  worker_id: string;
+  role: 'worker';
+  hostname: string;
+  ip_addresses: string[];
+  pid: number;
+  started_at: string;
+  last_seen_at: string;
+  worker_concurrency: number;
+  image_processing_concurrency: number;
+  active_tasks: number;
+  completed_since_start: number;
+  failed_since_start: number;
+  rss_bytes: number;
+  heap_used_bytes: number;
+  last_error_code?: string;
+  current_tasks: WorkerCurrentTask[];
+}
+
+interface WorkerSummary {
+  total: number;
+  active_tasks: number;
+  worker_concurrency: number;
+  image_processing_concurrency: number;
+  completed_since_start: number;
+  failed_since_start: number;
+  data: WorkerHeartbeat[];
+}
+
 interface AsyncOverview {
   enabled: boolean;
   tasks: AsyncTaskSummary;
   callbacks: CallbackSummary;
   queue: QueueStats | null;
+  workers: WorkerSummary;
 }
 
 interface AsyncTaskRecord {
@@ -583,7 +622,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
               aria-pressed={activeTab === 'async'}
             >
               <Send size={16} />
-              异步任务
+              任务队列
               {asyncBacklog > 0 ? <span>{formatNumber(asyncBacklog)}</span> : null}
             </button>
           </nav>
@@ -937,8 +976,8 @@ function AsyncOverviewPanel({ overview }: { overview: AsyncOverview }) {
     <section className="panel async-panel">
       <div className="panel-heading">
         <div>
-          <h2>异步任务运行态</h2>
-          <p>{overview.enabled ? '展示 PostgreSQL 任务事实库、Redis 队列和回调投递积压。' : '未配置 PostgreSQL 或 Redis，异步任务管理未启用。'}</p>
+          <h2>任务队列运行态</h2>
+          <p>{overview.enabled ? '展示 PostgreSQL 任务事实库、Redis 队列和回调投递积压，同步等待请求也会落在这里。' : '未配置 PostgreSQL 或 Redis，任务队列管理未启用。'}</p>
         </div>
         <span className={`status-pill ${overview.enabled ? 'ok' : 'neutral'}`}>
           {overview.enabled ? <CheckCircle2 size={13} /> : <CirclePause size={13} />}
@@ -975,6 +1014,109 @@ function AsyncOverviewPanel({ overview }: { overview: AsyncOverview }) {
           tone={queue && queue.failed > 0 ? 'warning' : 'default'}
           detail={queue ? `等待 ${queue.waiting} / 活跃 ${queue.active} / 失败 ${queue.failed}` : '未连接队列'}
         />
+      </div>
+      <WorkerPanel workers={overview.workers} enabled={overview.enabled} />
+    </section>
+  );
+}
+
+function WorkerPanel({ workers, enabled }: { workers: WorkerSummary; enabled: boolean }) {
+  return (
+    <section className="worker-panel" aria-label="运行节点">
+      <div className="worker-summary-grid">
+        <StatusTile
+          icon={<Cpu size={19} />}
+          label="在线 Worker"
+          value={enabled ? formatNumber(workers.total) : '-'}
+          tone={enabled && workers.total === 0 ? 'warning' : 'default'}
+          detail={enabled ? `活跃任务 ${formatNumber(workers.active_tasks)}` : '任务队列未启用'}
+        />
+        <StatusTile
+          icon={<Activity size={19} />}
+          label="图片处理总并发"
+          value={enabled ? formatNumber(workers.image_processing_concurrency) : '-'}
+          detail={`BullMQ 并发 ${enabled ? formatNumber(workers.worker_concurrency) : '-'}`}
+        />
+        <StatusTile
+          icon={<CheckCircle2 size={19} />}
+          label="节点启动后成功"
+          value={enabled ? formatNumber(workers.completed_since_start) : '-'}
+          tone="success"
+          detail="在线节点累计"
+        />
+        <StatusTile
+          icon={<XCircle size={19} />}
+          label="节点启动后失败"
+          value={enabled ? formatNumber(workers.failed_since_start) : '-'}
+          tone={workers.failed_since_start > 0 ? 'warning' : 'default'}
+          detail="在线节点累计"
+        />
+      </div>
+
+      <div className="worker-section">
+        <div className="worker-section-heading">
+          <div>
+            <h3>运行节点</h3>
+            <p>按 Redis 心跳展示在线 worker、IP、当前任务和节点内存。</p>
+          </div>
+          <span>{enabled ? `${formatNumber(workers.total)} 个在线` : '未启用'}</span>
+        </div>
+
+        <div className="worker-list">
+          {!enabled ? (
+            <div className="empty-state"><CirclePause size={18} />任务队列未启用</div>
+          ) : workers.data.length === 0 ? (
+            <div className="empty-state"><AlertTriangle size={18} />暂无在线 worker 心跳</div>
+          ) : workers.data.map((worker) => (
+            <article className="worker-card" key={worker.worker_id}>
+              <div className="worker-card-header">
+                <div className="worker-title">
+                  <strong>{worker.hostname}</strong>
+                  <span>IP {formatWorkerIps(worker.ip_addresses)}</span>
+                  <span>PID {worker.pid} · {shortId(worker.worker_id)}</span>
+                </div>
+                <span className="status-pill ok">在线</span>
+              </div>
+              <dl className="worker-stats">
+                <div>
+                  <dt>活跃</dt>
+                  <dd>{worker.active_tasks}</dd>
+                </div>
+                <div>
+                  <dt>图片处理并发</dt>
+                  <dd>{worker.image_processing_concurrency}</dd>
+                </div>
+                <div>
+                  <dt>成功/失败</dt>
+                  <dd>{worker.completed_since_start}/{worker.failed_since_start}</dd>
+                </div>
+                <div>
+                  <dt>RSS</dt>
+                  <dd>{formatBytes(worker.rss_bytes)}</dd>
+                </div>
+              </dl>
+              <div className="worker-meta">
+                <span>启动 {formatRelativeDuration(worker.started_at)}</span>
+                <span>心跳 {formatRelativeDuration(worker.last_seen_at)}</span>
+                {worker.last_error_code ? <span>最后错误 {worker.last_error_code}</span> : null}
+              </div>
+              {worker.current_tasks.length > 0 ? (
+                <div className="worker-task-list">
+                  {worker.current_tasks.map((task) => (
+                    <div className="worker-task" key={task.provider_task_id}>
+                      <span className="id-cell">{task.client_task_id}</span>
+                      <span>{asyncOperationLabel(task.operation)}</span>
+                      <span>{task.model}</span>
+                      <span>{formatRelativeDuration(task.started_at)}</span>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="worker-idle">当前无任务</div>
+              )}
+            </article>
+          ))}
+        </div>
       </div>
     </section>
   );
@@ -1037,8 +1179,8 @@ function AsyncTaskTable({ page, enabled, onPageChange, onPageSizeChange }: {
     <section className="panel table-panel">
       <div className="panel-heading">
         <div>
-          <h2>异步图片任务</h2>
-          <p>展示 direct lease 执行状态、R2 结果和安全版上游响应状态，不展示 prompt 和密钥。</p>
+          <h2>图片任务</h2>
+          <p>展示提交方式、direct lease 执行状态、R2 结果和安全版上游响应状态，不展示 prompt 和密钥。</p>
         </div>
       </div>
       <div className="table-scroll">
@@ -1049,6 +1191,7 @@ function AsyncTaskTable({ page, enabled, onPageChange, onPageSizeChange }: {
               <th>状态</th>
               <th>new-api 任务</th>
               <th>内部任务</th>
+              <th>提交方式</th>
               <th>执行方式/模型</th>
               <th>租约</th>
               <th>渠道</th>
@@ -1065,11 +1208,11 @@ function AsyncTaskTable({ page, enabled, onPageChange, onPageSizeChange }: {
           <tbody>
             {!enabled ? (
               <tr>
-                <td colSpan={15} className="table-empty">异步任务管理未启用</td>
+                <td colSpan={16} className="table-empty">任务队列管理未启用</td>
               </tr>
             ) : page.data.length === 0 ? (
               <tr>
-                <td colSpan={15} className="table-empty">暂无异步任务</td>
+                <td colSpan={16} className="table-empty">暂无图片任务</td>
               </tr>
             ) : page.data.map((task) => (
               <tr key={task.provider_task_id}>
@@ -1077,6 +1220,7 @@ function AsyncTaskTable({ page, enabled, onPageChange, onPageSizeChange }: {
                 <td><AsyncStatusPill status={task.status} /></td>
                 <td className="id-cell">{task.client_task_id}</td>
                 <td className="id-cell">{task.provider_task_id}</td>
+                <td>{formatSubmissionMode(task)}</td>
                 <td>{formatExecutorLabel(task)} / {task.model}</td>
                 <td className="id-cell">{formatLeaseId(task)}</td>
                 <td>{formatChannelId(task)}</td>
@@ -1094,10 +1238,10 @@ function AsyncTaskTable({ page, enabled, onPageChange, onPageSizeChange }: {
                 <td>
                   {task.first_image_url ? (
                     <div className="table-actions">
-                      <a className="icon-button" href={task.first_image_url} target="_blank" rel="noreferrer" title="打开图片 URL" aria-label="打开异步任务图片 URL">
+                      <a className="icon-button" href={task.first_image_url} target="_blank" rel="noreferrer" title="打开图片 URL" aria-label="打开图片任务 URL">
                         <LinkIcon size={14} />
                       </a>
-                      <button className="icon-button" onClick={() => void navigator.clipboard.writeText(task.first_image_url ?? '')} title="复制 URL" aria-label="复制异步任务图片 URL">
+                      <button className="icon-button" onClick={() => void navigator.clipboard.writeText(task.first_image_url ?? '')} title="复制 URL" aria-label="复制图片任务 URL">
                         <Copy size={14} />
                       </button>
                     </div>
@@ -1625,6 +1769,17 @@ function formatTaskError(task: AsyncTaskRecord): string {
   return `${code} · ${brief}`;
 }
 
+function formatSubmissionMode(task: AsyncTaskRecord): string {
+  const mode = getScalarParam(task.metadata, 'submission_mode');
+  if (mode === 'sync_wait') {
+    return '同步等待';
+  }
+  if (mode === 'async') {
+    return '异步提交';
+  }
+  return '未标记';
+}
+
 function formatExecutorLabel(task: AsyncTaskRecord): string {
   if (task.executor?.type === 'provider_direct_lease') {
     return '直连上游';
@@ -1705,6 +1860,34 @@ function formatDate(value: string): string {
   }).format(new Date(value));
 }
 
+function formatRelativeDuration(value: string): string {
+  const timestamp = new Date(value).getTime();
+  if (!Number.isFinite(timestamp)) {
+    return '-';
+  }
+  const seconds = Math.max(0, Math.floor((Date.now() - timestamp) / 1000));
+  if (seconds < 60) {
+    return `${seconds} 秒前`;
+  }
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) {
+    return `${minutes} 分钟前`;
+  }
+  const hours = Math.floor(minutes / 60);
+  if (hours < 48) {
+    return `${hours} 小时前`;
+  }
+  return formatDate(value);
+}
+
+function shortId(value: string): string {
+  return value.length > 18 ? `${value.slice(0, 8)}...${value.slice(-6)}` : value;
+}
+
+function formatWorkerIps(value: string[]): string {
+  return value.length > 0 ? value.join(', ') : '-';
+}
+
 function operationLabel(operation: RequestRecord['operation']): string {
   if (operation === 'manual_upload') {
     return '本地上传';
@@ -1712,7 +1895,7 @@ function operationLabel(operation: RequestRecord['operation']): string {
   return operation === 'edit' ? '图生图' : '文生图';
 }
 
-function asyncOperationLabel(operation: AsyncTaskRecord['operation']): string {
+function asyncOperationLabel(operation: AsyncTaskRecord['operation'] | string): string {
   return operation === 'edit' ? '图生图' : '文生图';
 }
 

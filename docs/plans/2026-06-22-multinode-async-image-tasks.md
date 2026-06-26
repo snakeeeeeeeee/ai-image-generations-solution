@@ -32,6 +32,16 @@ Authorization: Bearer <image_handle_api_key>
 Content-Type: application/json
 ```
 
+同步等待包装接口使用同一请求体，任务仍由 worker 执行：
+
+```http
+POST /v1/image/tasks/sync
+Authorization: Bearer <image_handle_api_key>
+Content-Type: application/json
+```
+
+任务在等待超时时间内进入终态时返回 `200`；超时时返回 `202` 和当前状态，后台任务继续执行，new-api 继续用 callback 或批量查询兜底。
+
 ```json
 {
   "request_id": "req_xxx",
@@ -104,6 +114,14 @@ failed
 任务处理进程在把任务推进到 `processing` 和终态时都使用 PostgreSQL CAS 更新，避免多台机器同时消费同一个 Redis 队列时重复执行同一任务。
 
 异步任务只支持 `executor.type = "provider_direct_lease"`。image-handle 不根据模型自己选择渠道；worker 调用 `executor.resolve_url` 领取短期凭证，再使用 new-api 已锁定的真实渠道直连上游完成生图或编辑图。同步 `/v1/images/generations`、`/v1/images/edits` 兼容接口保持原有上游转发逻辑。
+
+同步等待包装接口 `/v1/image/tasks/sync` 不改变任务执行模型，只在 API 进程里等待 PostgreSQL 任务终态。相关配置：
+
+```env
+SYNC_TASK_TIMEOUT_MS=300000
+SYNC_TASK_POLL_INTERVAL_MS=500
+SYNC_WAIT_CONCURRENCY=200
+```
 
 ## 回调协议
 

@@ -68,6 +68,8 @@ image-handle 部署管理脚本
   --build            prod/worker start/restart 前用本机 Dockerfile 构建 IMAGE_HANDLE_IMAGE。
   --force-recreate   start 时也强制重建容器。
   --scale svc=n      透传 compose scale，例如 --scale image-worker=5。
+  --scale-worker n   等同于 --scale image-worker=n。
+  --scale-notifier n 等同于 --scale image-notifier=n。
   --show-secrets     允许 config 命令输出完整配置。默认禁止，避免打印密钥。
   -h, --help         显示帮助。
 EOF
@@ -366,6 +368,24 @@ while [[ $# -gt 0 ]]; do
       SCALE_ARGS+=("${1#*=}")
       shift
       ;;
+    --scale-worker)
+      [[ $# -ge 2 ]] || fail "--scale-worker 需要值"
+      SCALE_ARGS+=("image-worker=$2")
+      shift 2
+      ;;
+    --scale-worker=*)
+      SCALE_ARGS+=("image-worker=${1#*=}")
+      shift
+      ;;
+    --scale-notifier)
+      [[ $# -ge 2 ]] || fail "--scale-notifier 需要值"
+      SCALE_ARGS+=("image-notifier=$2")
+      shift 2
+      ;;
+    --scale-notifier=*)
+      SCALE_ARGS+=("image-notifier=${1#*=}")
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -410,6 +430,24 @@ while [[ $# -gt 0 ]]; do
       ;;
     --scale=*)
       SCALE_ARGS+=("${1#*=}")
+      shift
+      ;;
+    --scale-worker)
+      [[ $# -ge 2 ]] || fail "--scale-worker 需要值"
+      SCALE_ARGS+=("image-worker=$2")
+      shift 2
+      ;;
+    --scale-worker=*)
+      SCALE_ARGS+=("image-worker=${1#*=}")
+      shift
+      ;;
+    --scale-notifier)
+      [[ $# -ge 2 ]] || fail "--scale-notifier 需要值"
+      SCALE_ARGS+=("image-notifier=$2")
+      shift
+      ;;
+    --scale-notifier=*)
+      SCALE_ARGS+=("image-notifier=${1#*=}")
       shift
       ;;
     -h|--help)

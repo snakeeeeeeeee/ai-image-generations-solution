@@ -4,7 +4,7 @@
 
 服务支持 `POST /v1/images/generations` 和 `POST /v1/images/edits`。同步兼容模式下，它会把调用方的 `Authorization` 透传给 new-api，把上游返回的 `b64_json` 图片上传到 Cloudflare R2，并向调用方返回公开图片 URL，而不是 base64 JSON。
 
-服务也支持高吞吐异步任务模式。异步模式下，new-api 提交任务，image-handle 通过任务处理进程执行生图、上传 R2、把状态写入 PostgreSQL，并在任务进入终态时通过回调通知 new-api。
+服务也支持高吞吐异步任务模式。异步模式下，new-api 提交任务，image-handle 通过任务处理进程执行生图、上传 R2、把状态写入 PostgreSQL，并在任务进入终态时通过回调通知 new-api。需要同步体验时，可以调用同步等待包装接口，任务仍由 worker 执行，API 请求只等待终态或超时。
 
 ## GPT-Image-2 模型分组
 
@@ -72,6 +72,11 @@ IMAGE_PROCESSING_CONCURRENCY=10
 GLOBAL_RATE_LIMIT_IPM=250
 CALLBACK_DEFAULT_SECRET=local-callback-secret
 CALLBACK_SECRETS_JSON={}
+SYNC_TASK_TIMEOUT_MS=300000
+SYNC_TASK_POLL_INTERVAL_MS=500
+SYNC_WAIT_CONCURRENCY=200
+WORKER_HEARTBEAT_INTERVAL_MS=5000
+WORKER_HEARTBEAT_TTL_SECONDS=15
 ```
 
 ## 运行
@@ -155,6 +160,38 @@ curl http://127.0.0.1:8787/v1/image/tasks \
     }
   }'
 ```
+
+同步等待包装接口复用同一个请求体，只把路径换成 `/v1/image/tasks/sync`。它会先创建任务并入队，然后等待 worker 写入终态：
+
+```bash
+curl http://127.0.0.1:8787/v1/image/tasks/sync \
+  -H 'Authorization: Bearer provider-test-key' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "request_id": "req_sync_1",
+    "client_task_id": "task_sync_1",
+    "model": "gpt-image-2",
+    "operation": "generation",
+    "input": {
+      "text": "a mechanical cat watching sunset"
+    },
+    "parameters": {
+      "size": "1024x1024",
+      "n": 1,
+      "output_format": "png"
+    },
+    "executor": {
+      "type": "provider_direct_lease",
+      "lease_id": "lease_task_sync_1",
+      "resolve_url": "http://mock-new-api:3999/api/internal/image/credential-leases/lease_task_sync_1/resolve",
+      "secret_id": "image_handle_1"
+    }
+  }'
+```
+
+同步等待接口在任务完成时返回 `200` 和 `succeeded/failed`；超过 `SYNC_TASK_TIMEOUT_MS` 时返回 `202` 和当前 `processing/queued` 状态，任务继续由 worker 在后台执行，new-api 继续用 callback 或查询兜底。
+
+同步等待接口可以额外传 `"result_data_format": "base64"`，只在当前 HTTP 响应里返回 `result.images[].b64_json`。普通异步接口、任务查询和 callback 仍然只返回 R2 URL；base64 不写 PostgreSQL、不进 callback，单次响应上限固定为 100MB。
 
 查询单个任务：
 
