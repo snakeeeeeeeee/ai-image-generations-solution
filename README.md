@@ -193,6 +193,35 @@ curl http://127.0.0.1:8787/v1/image/tasks/sync \
 
 同步等待接口可以额外传 `"result_data_format": "base64"`，只在当前 HTTP 响应里返回 `result.images[].b64_json`。普通异步接口、任务查询和 callback 仍然只返回 R2 URL；base64 不写 PostgreSQL、不进 callback，单次响应上限固定为 100MB。
 
+编辑图任务的 `input.images` 和 `input.mask` 只接收 URL。如果 new-api 收到 multipart 或 base64 输入，先调用上传接口把输入图转成临时 R2 URL，再提交 edit 任务：
+
+```bash
+curl http://127.0.0.1:8787/v1/image/uploads \
+  -H 'Authorization: Bearer provider-test-key' \
+  -F 'image=@./input.png' \
+  -F 'mask=@./mask.png'
+```
+
+```bash
+curl http://127.0.0.1:8787/v1/image/uploads/base64 \
+  -H 'Authorization: Bearer provider-test-key' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "images": [
+      {
+        "b64_json": "iVBORw0KGgo...",
+        "filename": "input.png"
+      }
+    ],
+    "mask": {
+      "b64_json": "iVBORw0KGgo...",
+      "filename": "mask.png"
+    }
+  }'
+```
+
+响应里的 `images` 和 `mask` 可以直接放进 `/v1/image/tasks` 或 `/v1/image/tasks/sync` 的 edit 请求。上传对象路径是 `R2_KEY_PREFIX/tmp/uploads/YYYY/MM/DD/upload_xxx.ext`，建议在 R2 配生命周期清理。
+
 查询单个任务：
 
 ```bash

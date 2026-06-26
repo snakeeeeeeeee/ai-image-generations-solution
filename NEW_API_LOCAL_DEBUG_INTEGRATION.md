@@ -25,6 +25,7 @@ image-handle 负责：
 核心约束：
 
 - 任务 payload 里不要传真实上游 `api_key`。
+- 编辑图任务 payload 只传图片 URL；如果用户输入是 multipart 或 base64，new-api 先调用 image-handle 上传接口换成临时 R2 URL。
 - image-handle 不做渠道选择、不做计费、不判断余额。
 - 默认图片结果返回 R2 URL；如果 new-api 需要给调用方同步返回 base64，只能调用 `/v1/image/tasks/sync` 并传 `result_data_format=base64`。
 - 上游错误不做业务隐藏：标准 `error` 会返回上游 HTTP 状态码、上游 error code/type/message/param；`raw_response` 会返回安全版上游原始 JSON。
@@ -172,6 +173,65 @@ Content-Type: application/json
 - base64 不写入 PostgreSQL，不进入 callback，不在管理台展示，只短期写 Redis 给当前同步等待请求读取。
 - 单次 base64 响应上限固定 100MB，超过会失败为 `base64_result_too_large`。
 - 同一个 `client_task_id` 重复提交时，以第一次创建任务时的 `result_data_format` 为准，不要复用同一个任务 ID 切换 URL/base64。
+
+编辑图输入规则：
+
+- `/v1/image/tasks` 和 `/v1/image/tasks/sync` 的 `input.images`、`input.mask` 只接收 `http/https` URL。
+- 用户上传 multipart 或 base64 图片时，new-api 先调用 `/v1/image/uploads` 或 `/v1/image/uploads/base64`。
+- 上传接口返回临时 R2 URL 后，new-api 再提交 edit 任务。
+- 上传接口只负责把输入图转成 URL，不创建任务、不触发上游调用。
+
+multipart 上传示例：
+
+```bash
+curl -sS -X POST "http://127.0.0.1:8787/v1/image/uploads" \
+  -H "Authorization: Bearer test-api-key" \
+  -F "image=@./input.png" \
+  -F "mask=@./mask.png"
+```
+
+base64 上传示例：
+
+```bash
+curl -sS -X POST "http://127.0.0.1:8787/v1/image/uploads/base64" \
+  -H "Authorization: Bearer test-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "images": [
+      {
+        "b64_json": "iVBORw0KGgo...",
+        "filename": "input.png"
+      }
+    ],
+    "mask": {
+      "b64_json": "iVBORw0KGgo...",
+      "filename": "mask.png"
+    }
+  }'
+```
+
+上传响应里直接取 `images` 和 `mask` 提交 edit 任务：
+
+```json
+{
+  "uploads": [
+    {
+      "field": "image",
+      "url": "https://img.example.com/images/tmp/uploads/2026/06/27/upload_xxx.png",
+      "mime_type": "image/png",
+      "temporary": true
+    }
+  ],
+  "images": [
+    "https://img.example.com/images/tmp/uploads/2026/06/27/upload_xxx.png"
+  ],
+  "mask": "https://img.example.com/images/tmp/uploads/2026/06/27/upload_yyy.png",
+  "by_field": {
+    "image": ["https://img.example.com/images/tmp/uploads/2026/06/27/upload_xxx.png"],
+    "mask": ["https://img.example.com/images/tmp/uploads/2026/06/27/upload_yyy.png"]
+  }
+}
+```
 
 文生图示例：
 

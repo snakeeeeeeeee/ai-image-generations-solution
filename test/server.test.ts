@@ -13,6 +13,21 @@ const tinyJpegBuffer = Buffer.from([
   0xff, 0xd9
 ]);
 
+const fakeAsyncStore = {
+  close: async () => undefined
+};
+
+const fakeQueueClients = {
+  connection: {
+    get: async () => null,
+    disconnect: () => undefined
+  },
+  taskQueue: {
+    add: async () => undefined,
+    close: async () => undefined
+  }
+};
+
 type DeepPartial<T> = {
   [K in keyof T]?: T[K] extends object ? DeepPartial<T[K]> : T[K];
 };
@@ -705,6 +720,139 @@ test('POST /v1/images/edits forwards multipart image edit request and returns UR
 
   await app.close();
   await upstream.close();
+});
+
+test('POST /v1/image/uploads accepts multipart images and returns temporary URLs for edit tasks', async () => {
+  const uploaded: Array<{ key: string; contentType: string; bytes: number }> = [];
+  const app = buildServer(buildTestConfig('http://127.0.0.1:1', {
+    asyncTasks: {
+      postgresUrl: 'postgres://test',
+      redisUrl: 'redis://test',
+      providerApiKeys: ['provider-test-key']
+    }
+  }), {
+    asyncTaskStore: fakeAsyncStore as never,
+    queueClients: fakeQueueClients as never,
+    uploadImageToR2: async ({ key, contentType, buffer }) => {
+      uploaded.push({ key, contentType, bytes: buffer.length });
+      return `https://img.example.com/${key}`;
+    }
+  });
+
+  const form = new FormData();
+  form.append('image', new Blob([Buffer.from(tinyPngBase64, 'base64')], { type: 'image/png' }), 'input.png');
+  form.append('mask', new Blob([Buffer.from(tinyPngBase64, 'base64')], { type: 'image/png' }), 'mask.png');
+
+  const response = await app.inject({
+    method: 'POST',
+    url: '/v1/image/uploads',
+    headers: {
+      authorization: 'Bearer provider-test-key'
+    },
+    payload: form
+  });
+
+  assert.equal(response.statusCode, 200);
+  assert.equal(uploaded.length, 2);
+  assert.match(uploaded[0]?.key ?? '', /^images\/tmp\/uploads\/\d{4}\/\d{2}\/\d{2}\/upload_.+\.png$/);
+  assert.equal(uploaded[0]?.contentType, 'image/png');
+  const body = response.json() as {
+    uploads: Array<{ field: string; url: string; mime_type: string; bytes: number; temporary: boolean }>;
+    images: string[];
+    mask: string | null;
+    by_field: Record<string, string[]>;
+  };
+  assert.equal(body.uploads.length, 2);
+  assert.equal(body.uploads[0]?.field, 'image');
+  assert.equal(body.uploads[0]?.mime_type, 'image/png');
+  assert.equal(body.uploads[0]?.temporary, true);
+  assert.deepEqual(body.images, [body.uploads[0]?.url]);
+  assert.equal(body.mask, body.uploads[1]?.url);
+  assert.deepEqual(body.by_field.image, [body.uploads[0]?.url]);
+  assert.deepEqual(body.by_field.mask, [body.uploads[1]?.url]);
+
+  await app.close();
+});
+
+test('POST /v1/image/uploads/base64 accepts JSON base64 images and mask', async () => {
+  const app = buildServer(buildTestConfig('http://127.0.0.1:1', {
+    asyncTasks: {
+      postgresUrl: 'postgres://test',
+      redisUrl: 'redis://test',
+      providerApiKeys: ['provider-test-key']
+    }
+  }), {
+    asyncTaskStore: fakeAsyncStore as never,
+    queueClients: fakeQueueClients as never,
+    uploadImageToR2: async ({ key }) => `https://img.example.com/${key}`
+  });
+
+  const response = await app.inject({
+    method: 'POST',
+    url: '/v1/image/uploads/base64',
+    headers: {
+      authorization: 'Bearer provider-test-key',
+      'content-type': 'application/json'
+    },
+    payload: {
+      images: [
+        {
+          b64_json: tinyPngBase64,
+          filename: 'input.png'
+        }
+      ],
+      mask: {
+        b64_json: tinyPngBase64,
+        filename: 'mask.png'
+      }
+    }
+  });
+
+  assert.equal(response.statusCode, 200);
+  const body = response.json() as {
+    uploads: Array<{ field: string; url: string; key: string }>;
+    images: string[];
+    mask: string | null;
+  };
+  assert.equal(body.uploads.length, 2);
+  assert.equal(body.uploads[0]?.field, 'image');
+  assert.equal(body.uploads[1]?.field, 'mask');
+  assert.deepEqual(body.images, [body.uploads[0]?.url]);
+  assert.equal(body.mask, body.uploads[1]?.url);
+  assert.match(body.uploads[0]?.key ?? '', /^images\/tmp\/uploads\/\d{4}\/\d{2}\/\d{2}\/upload_.+\.png$/);
+
+  await app.close();
+});
+
+test('POST /v1/image/uploads/base64 rejects invalid base64 images', async () => {
+  const app = buildServer(buildTestConfig('http://127.0.0.1:1', {
+    asyncTasks: {
+      postgresUrl: 'postgres://test',
+      redisUrl: 'redis://test',
+      providerApiKeys: ['provider-test-key']
+    }
+  }), {
+    asyncTaskStore: fakeAsyncStore as never,
+    queueClients: fakeQueueClients as never,
+    uploadImageToR2: async ({ key }) => `https://img.example.com/${key}`
+  });
+
+  const response = await app.inject({
+    method: 'POST',
+    url: '/v1/image/uploads/base64',
+    headers: {
+      authorization: 'Bearer provider-test-key',
+      'content-type': 'application/json'
+    },
+    payload: {
+      images: ['not-base64']
+    }
+  });
+
+  assert.equal(response.statusCode, 400);
+  assert.equal((response.json() as { error: { code: string } }).error.code, 'invalid_upload_base64');
+
+  await app.close();
 });
 
 test('POST /v1/images/generations retries transient R2 upload failures', async () => {

@@ -8,6 +8,7 @@ import type { AdminRuntimeStats, ImageRequestRecord } from './admin/types.js';
 import { registerAsyncTaskRoutes } from './async/routes.js';
 import { AsyncTaskStore } from './async/store.js';
 import { createQueueClients, closeQueueClients, type QueueClients } from './async/queue.js';
+import { registerImageUploadRoutes } from './async/uploads.js';
 import type { AppConfig } from './config.js';
 import { AppError, openAIError, sendAppError } from './errors.js';
 import { buildImageKey, decodeBase64Image, normalizeImageRequestBody, readImageMetadata, type ImageMetadata, type ImageRequestBody } from './image.js';
@@ -843,6 +844,11 @@ export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyIn
       store: asyncStore,
       taskQueue: queueClients.taskQueue,
       base64ResultRedis: queueClients.connection
+    });
+    registerImageUploadRoutes(app, {
+      config,
+      r2Client,
+      upload
     });
   }
 

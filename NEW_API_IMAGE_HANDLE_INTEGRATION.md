@@ -22,6 +22,7 @@
 
 - 任务 payload 不传真实上游 `api_key`。
 - new-api 不再中转大图 base64。
+- 编辑图任务 payload 只传图片 URL；如果用户输入是 multipart 或 base64，new-api 先调用 image-handle 上传接口换成临时 R2 URL。
 - image-handle 不选择 provider/channel，只执行 new-api 已锁定的真实渠道。
 - 默认图片结果返回 R2 URL；`base64` 只允许同步等待接口短期返回，不进入 callback 或查询结果。
 - 上游错误不做业务隐藏：标准 `error` 会返回上游 HTTP 状态码、上游 error code/type/message/param；`raw_response` 会返回安全版上游原始 JSON。
@@ -92,8 +93,8 @@ Content-Type: application/json
 | `operation` | 是 | `generation` 或 `edit`。 |
 | `result_data_format` | 否 | 返回结果格式，默认 `url`。普通异步接口只支持 `url`；同步等待接口可传 `base64`。 |
 | `input.text` | 是 | 统一文本输入，worker 调上游时映射为 OpenAI Images 的 `prompt`。 |
-| `input.images` | edit 必填 | 编辑图输入图片 URL 数组。第一版只支持 URL。 |
-| `input.mask` | 否 | 编辑图 mask URL。 |
+| `input.images` | edit 必填 | 编辑图输入图片 URL 数组。任务接口只支持 URL；multipart/base64 先走上传接口。 |
+| `input.mask` | 否 | 编辑图 mask URL；multipart/base64 mask 先走上传接口。 |
 | `parameters` | 否 | 通用模型参数，例如 `size`、`quality`、`n`、`output_format`。 |
 | `executor.type` | 是 | 固定为 `provider_direct_lease`。 |
 | `executor.lease_id` | 是 | new-api 创建的短期执行租约 ID。 |
@@ -180,6 +181,129 @@ new-api 推荐处理方式：
   }
 }
 ```
+
+## 5.1 编辑图输入上传接口
+
+编辑图任务的 `input.images` 和 `input.mask` 仍然只接收 `http/https` URL。用户上传的是 multipart 文件或 base64 时，new-api 先调用 image-handle 的临时上传接口，由 image-handle 上传到 R2 并返回临时 URL，然后 new-api 再把这些 URL 放进 `/v1/image/tasks` 或 `/v1/image/tasks/sync`。
+
+这样可以让 multipart/base64 编辑图也走 image-worker，同时避免把大 base64 或 multipart 文件塞进任务队列和 PostgreSQL。
+
+multipart 上传：
+
+```http
+POST /v1/image/uploads
+Authorization: Bearer <image_handle_api_key>
+Content-Type: multipart/form-data
+```
+
+示例：
+
+```bash
+curl --location 'https://api.supertoken.cc/image-wrapper/v1/image/uploads' \
+  -H "Authorization: Bearer <image_handle_api_key>" \
+  -F 'image=@./input.png' \
+  -F 'mask=@./mask.png'
+```
+
+base64 上传：
+
+```http
+POST /v1/image/uploads/base64
+Authorization: Bearer <image_handle_api_key>
+Content-Type: application/json
+```
+
+示例：
+
+```json
+{
+  "images": [
+    {
+      "b64_json": "iVBORw0KGgo...",
+      "filename": "input.png"
+    }
+  ],
+  "mask": {
+    "b64_json": "iVBORw0KGgo...",
+    "filename": "mask.png"
+  }
+}
+```
+
+也支持显式 `uploads` 数组：
+
+```json
+{
+  "uploads": [
+    {
+      "field": "image",
+      "filename": "input.png",
+      "b64_json": "iVBORw0KGgo..."
+    },
+    {
+      "field": "mask",
+      "filename": "mask.png",
+      "b64_json": "iVBORw0KGgo..."
+    }
+  ]
+}
+```
+
+上传响应：
+
+```json
+{
+  "uploads": [
+    {
+      "id": "upload_xxx",
+      "field": "image",
+      "filename": "input.png",
+      "key": "images/tmp/uploads/2026/06/27/upload_xxx.png",
+      "url": "https://img.example.com/images/tmp/uploads/2026/06/27/upload_xxx.png",
+      "mime_type": "image/png",
+      "bytes": 12345,
+      "width": 1024,
+      "height": 1024,
+      "format": "png",
+      "temporary": true
+    }
+  ],
+  "images": [
+    "https://img.example.com/images/tmp/uploads/2026/06/27/upload_xxx.png"
+  ],
+  "mask": "https://img.example.com/images/tmp/uploads/2026/06/27/upload_yyy.png",
+  "by_field": {
+    "image": [
+      "https://img.example.com/images/tmp/uploads/2026/06/27/upload_xxx.png"
+    ],
+    "mask": [
+      "https://img.example.com/images/tmp/uploads/2026/06/27/upload_yyy.png"
+    ]
+  }
+}
+```
+
+new-api 后续提交编辑图任务时使用响应里的 `images` 和 `mask`：
+
+```json
+{
+  "operation": "edit",
+  "input": {
+    "text": "改成赛博朋克风格",
+    "images": ["https://img.example.com/images/tmp/uploads/2026/06/27/upload_xxx.png"],
+    "mask": "https://img.example.com/images/tmp/uploads/2026/06/27/upload_yyy.png"
+  }
+}
+```
+
+上传接口说明：
+
+- 鉴权同任务接口，使用 `PROVIDER_API_KEYS`。
+- 支持 `png`、`jpeg`、`webp`，会返回图片宽高和 mime type。
+- 上传对象路径为 `R2_KEY_PREFIX/tmp/uploads/YYYY/MM/DD/upload_xxx.ext`。
+- 临时文件生命周期建议在 R2 上配置规则清理，例如 1 天后删除 `tmp/uploads/`。
+- 上传接口只负责把输入图变成 URL，不创建任务、不触发计费、不调用上游模型。
+- 如果上传失败，new-api 不应提交后续 edit 任务，应按自己的预扣费逻辑释放或退款。
 
 ## 6. 同步等待响应
 
