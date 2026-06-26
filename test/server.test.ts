@@ -341,14 +341,21 @@ test('POST /v1/images/generations accepts xAI b64_json image responses', async (
   await upstream.close();
 });
 
-test('POST /v1/images/generations keeps GPT image strategy b64_json-only', async () => {
+test('POST /v1/images/generations accepts GPT image URL responses', async () => {
   const upstream = Fastify();
+  let imageUrl = '';
+  const uploaded: Array<{ key: string; contentType: string; bytes: number }> = [];
 
+  upstream.get('/gpt-generated.png', async (_request, reply) => {
+    reply.header('content-type', 'image/png');
+    return reply.send(Buffer.from(tinyPngBase64, 'base64'));
+  });
   upstream.post('/v1/images/generations', async () => ({
     created: 1780000000,
     data: [
       {
-        url: 'https://example.com/generated.png'
+        url: imageUrl,
+        mime_type: 'image/png'
       }
     ]
   }));
@@ -357,9 +364,13 @@ test('POST /v1/images/generations keeps GPT image strategy b64_json-only', async
   const upstreamAddress = upstream.server.address();
   assert.ok(upstreamAddress && typeof upstreamAddress === 'object');
   const port = (upstreamAddress as AddressInfo).port;
+  imageUrl = `http://127.0.0.1:${port}/gpt-generated.png`;
 
   const app = buildServer(buildTestConfig(`http://127.0.0.1:${port}`), {
-    uploadImageToR2: async ({ key }) => `https://img.example.com/${key}`
+    uploadImageToR2: async ({ key, contentType, buffer }) => {
+      uploaded.push({ key, contentType, bytes: buffer.length });
+      return `https://img.example.com/${key}`;
+    }
   });
 
   const response = await app.inject({
@@ -375,8 +386,14 @@ test('POST /v1/images/generations keeps GPT image strategy b64_json-only', async
     }
   });
 
-  assert.equal(response.statusCode, 502);
-  assert.equal(response.json().error.code, 'missing_b64_json');
+  assert.equal(response.statusCode, 200);
+  assert.equal(uploaded.length, 1);
+  assert.equal(uploaded[0]?.contentType, 'image/png');
+  assert.equal(uploaded[0]?.bytes, Buffer.from(tinyPngBase64, 'base64').length);
+  assert.match(uploaded[0]?.key ?? '', /^images\/\d{4}\/\d{2}\/\d{2}\/.+\.png$/);
+
+  const body = response.json() as { data: Array<{ url: string }> };
+  assert.match(body.data[0]?.url ?? '', /^https:\/\/img\.example\.com\/images\/\d{4}\/\d{2}\/\d{2}\/.+\.png$/);
 
   await app.close();
   await upstream.close();

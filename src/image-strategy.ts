@@ -65,25 +65,6 @@ function getDeclaredMimeType(item: StrategyUpstreamImageItem): string | undefine
   return getString(item.mime_type) ?? getString(item.mimeType);
 }
 
-function extractBase64Only(response: StrategyUpstreamImageResponse): ImageSource[] {
-  return getData(response).map((item) => {
-    const b64Json = getString(item.b64_json);
-    if (!b64Json) {
-      throw new AppError('new-api returned image data without b64_json', {
-        statusCode: 502,
-        type: 'server_error',
-        code: 'missing_b64_json'
-      });
-    }
-
-    return {
-      type: 'base64',
-      value: b64Json,
-      declaredMimeType: getDeclaredMimeType(item)
-    };
-  });
-}
-
 function extractUrlOrBase64(response: StrategyUpstreamImageResponse): ImageSource[] {
   return getData(response).map((item) => {
     const b64Json = getString(item.b64_json);
@@ -125,7 +106,7 @@ export const gptImageStrategy: ImageModelStrategy = {
   allowedFormats: ['png'],
   match: (body) => isGptImageModel(body.model),
   applyRequestDefaults: applyImageDefaults,
-  extractImages: extractBase64Only
+  extractImages: extractUrlOrBase64
 };
 
 export const genericOpenAICompatibleStrategy: ImageModelStrategy = {
