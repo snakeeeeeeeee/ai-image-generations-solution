@@ -98,7 +98,18 @@ export interface CallbackEventRecord {
 }
 
 export interface TaskResultPayload {
-  images: Array<{ url: string; mime_type?: string }>;
+  images: Array<{
+    url: string;
+    mime_type?: string;
+    format?: string;
+    width?: number;
+    height?: number;
+    size_bytes?: number;
+    filename?: string;
+    revised_prompt?: string;
+  }>;
+  output?: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
 }
 
 export interface Base64TaskResultPayload {

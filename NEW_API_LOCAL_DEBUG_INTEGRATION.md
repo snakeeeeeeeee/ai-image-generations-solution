@@ -328,9 +328,27 @@ curl -sS -X POST "http://127.0.0.1:8787/v1/image/uploads/base64" \
     "images": [
       {
         "url": "https://img.example.com/images/xxx.png",
-        "mime_type": "image/png"
+        "mime_type": "image/png",
+        "format": "png",
+        "width": 1024,
+        "height": 1024,
+        "size_bytes": 1234567,
+        "filename": "xxx.png",
+        "revised_prompt": "..."
       }
-    ]
+    ],
+    "output": {
+      "created": 1782581166,
+      "background": "opaque",
+      "output_format": "png",
+      "quality": "high",
+      "size": "1024x1024"
+    },
+    "metadata": {
+      "image_count": 1,
+      "input_image_count": 0,
+      "mask_used": false
+    }
   },
   "sync_wait": {
     "completed": true,
@@ -528,9 +546,27 @@ image-handle 优先发送批量 callback。如果任务 payload 有 `callback.ba
         "images": [
           {
             "url": "https://img.xxx.com/images/xxx.png",
-            "mime_type": "image/png"
+            "mime_type": "image/png",
+            "format": "png",
+            "width": 1024,
+            "height": 1024,
+            "size_bytes": 1234567,
+            "filename": "xxx.png",
+            "revised_prompt": "..."
           }
-        ]
+        ],
+        "output": {
+          "created": 1782581166,
+          "background": "opaque",
+          "output_format": "png",
+          "quality": "high",
+          "size": "1024x1024"
+        },
+        "metadata": {
+          "image_count": 1,
+          "input_image_count": 0,
+          "mask_used": false
+        }
       },
       "usage": {
         "total_tokens": 123
@@ -815,6 +851,7 @@ new-api 本地联调至少确认：
 - 同步等待接口完成时返回 `200 + succeeded/failed`；超时时返回 `202 + processing/queued`，任务继续后台执行。
 - `/v1/image/tasks` 传 `result_data_format=base64` 返回 `400 unsupported_result_data_format`。
 - `/v1/image/tasks/sync` 传 `result_data_format=base64` 时，成功响应返回 `result.images[].b64_json`。
+- URL 结果里 `result.images[]` 会包含 R2 URL、真实格式、宽高、字节数和 `revised_prompt`；`result.output` 包含上游常用输出字段，例如 `quality/output_format/size/background`。
 - new-api resolve 接口能收到并通过 `X-ImageHandle-*` HMAC 验签。
 - resolve 返回的 `api_key` 不出现在 image-handle 查询结果、callback、日志和管理台里。
 - worker 能按 resolve 返回的 `base_url / api_key / model` 直连上游。

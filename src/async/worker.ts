@@ -11,7 +11,7 @@ import type { AsyncTaskStore } from './store.js';
 import type { AsyncTaskError, AsyncTaskRecord, TaskQueuePayload } from './types.js';
 import { extractBase64TaskResult, isBase64ResultRequested, writeBase64TaskResult } from './base64-result.js';
 import { executeUpstreamPayload } from '../image-runner.js';
-import type { ImageOperation, UploadImageToR2, UpstreamDispatcher, UpstreamRequestPayload } from '../image-runner.js';
+import type { ImageOperation, UploadImageToR2, UpstreamDispatcher, UpstreamRequestPayload, ImageExecutionResult } from '../image-runner.js';
 import { AppError } from '../errors.js';
 import { uploadWithRetry } from '../upload-retry.js';
 import { uploadImageToR2 } from '../r2.js';
@@ -49,10 +49,23 @@ interface CredentialLease {
 }
 
 interface DirectExecuteResult {
-  data: Array<{ url: string; mime_type?: string }>;
+  data: TaskResultImage[];
   usage: Record<string, unknown>;
   rawResponse: unknown;
   upstreamResponse: unknown;
+  output: Record<string, unknown>;
+  metadata: Record<string, unknown>;
+}
+
+interface TaskResultImage {
+  url: string;
+  mime_type?: string;
+  format?: string;
+  width?: number;
+  height?: number;
+  size_bytes?: number;
+  filename?: string;
+  revised_prompt?: string;
 }
 
 export function startAsyncWorker({
@@ -177,9 +190,7 @@ export async function processTask({
         })
       });
 
-      const resultPayload = {
-        images: result.data
-      };
+      const resultPayload = buildResultPayload(result);
       const usagePayload = result.usage;
       const safeRaw = sanitizeRawResponse(result.rawResponse, config.asyncTasks.rawResponseMaxBytes);
       if (isBase64ResultRequested(claimed)) {
@@ -301,6 +312,14 @@ function buildCallbackPayload({
   };
 }
 
+function buildResultPayload(result: DirectExecuteResult): Record<string, unknown> {
+  return {
+    images: result.data,
+    output: result.output,
+    metadata: result.metadata
+  };
+}
+
 async function executeDirectLeaseTask({
   task,
   lease,
@@ -339,11 +358,83 @@ async function executeDirectLeaseTask({
   });
 
   return {
-    data: execution.data,
+    data: buildResultImages(execution),
     usage: safeObject(execution.upstreamResponse.usage),
     rawResponse: rewriteRawResponseImages(execution.upstreamResponse, execution.data),
-    upstreamResponse: execution.upstreamResponse
+    upstreamResponse: execution.upstreamResponse,
+    output: buildOutputPayload(execution.upstreamResponse),
+    metadata: buildExecutionMetadata({ task, execution })
   };
+}
+
+function buildResultImages(execution: ImageExecutionResult): TaskResultImage[] {
+  const data = Array.isArray(execution.upstreamResponse.data) ? execution.upstreamResponse.data : [];
+  return execution.data.map((image, index) => {
+    const metadata = execution.outputImages[index];
+    const upstreamItem = safeObject(data[index]);
+    const result: TaskResultImage = {
+      ...image
+    };
+    if (metadata) {
+      result.mime_type = metadata.mimeType;
+      result.format = metadata.format;
+      result.width = metadata.width;
+      result.height = metadata.height;
+      result.size_bytes = metadata.bytes;
+      result.filename = filenameFromUrl(image.url, metadata.extension);
+    }
+    const revisedPrompt = getString(upstreamItem.revised_prompt);
+    if (revisedPrompt) {
+      result.revised_prompt = revisedPrompt;
+    }
+    return result;
+  });
+}
+
+function buildOutputPayload(upstreamResponse: unknown): Record<string, unknown> {
+  const response = safeObject(upstreamResponse);
+  const output: Record<string, unknown> = {};
+  for (const key of ['created', 'background', 'output_format', 'quality', 'size']) {
+    const value = response[key];
+    if (['string', 'number', 'boolean'].includes(typeof value)) {
+      output[key] = value;
+    }
+  }
+  return output;
+}
+
+function buildExecutionMetadata({
+  task,
+  execution
+}: {
+  task: AsyncTaskRecord;
+  execution: ImageExecutionResult;
+}): Record<string, unknown> {
+  const metadata: Record<string, unknown> = {
+    image_count: execution.data.length
+  };
+  if (task.operation === 'edit') {
+    metadata.input_image_count = Array.isArray(task.input.images) ? task.input.images.length : 0;
+    metadata.mask_used = typeof task.input.mask === 'string' && task.input.mask.trim() !== '';
+  }
+  const inputFidelity = getString(task.parameters.input_fidelity);
+  if (inputFidelity) {
+    metadata.input_fidelity = inputFidelity;
+  }
+  return metadata;
+}
+
+function filenameFromUrl(value: string, fallbackExtension: string): string {
+  try {
+    const pathname = new URL(value).pathname;
+    const filename = pathname.split('/').filter(Boolean).pop();
+    if (filename) {
+      return filename;
+    }
+  } catch {
+    // The R2 public URL should be absolute, but keep a stable fallback for tests/mocks.
+  }
+  return `image.${fallbackExtension}`;
 }
 
 function isUpstreamDebugEnabled(task: AsyncTaskRecord): boolean {

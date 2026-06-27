@@ -193,6 +193,8 @@ curl http://127.0.0.1:8787/v1/image/tasks/sync \
 
 同步等待接口可以额外传 `"result_data_format": "base64"`，只在当前 HTTP 响应里返回 `result.images[].b64_json`。普通异步接口、任务查询和 callback 仍然只返回 R2 URL；base64 不写 PostgreSQL、不进 callback，单次响应上限固定为 100MB。
 
+URL 结果会在 `result.images[]` 带回 R2 URL、真实 `mime_type/format/width/height/size_bytes` 和上游 `revised_prompt`；`result.output` 会带回上游常用输出字段，例如 `quality/output_format/size/background`，方便 new-api 写资产表和展示资源信息。
+
 编辑图任务的 `input.images` 和 `input.mask` 只接收 URL。如果 new-api 收到 multipart 或 base64 输入，先调用上传接口把输入图转成临时 R2 URL，再提交 edit 任务：
 
 ```bash

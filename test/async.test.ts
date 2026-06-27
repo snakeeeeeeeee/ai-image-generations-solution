@@ -641,7 +641,11 @@ test('worker resolves credential lease, calls upstream directly, uploads R2, and
     return {
       id: 'resp_1',
       created: 123,
+      background: 'opaque',
       model: 'gpt-image-2',
+      output_format: 'png',
+      quality: 'high',
+      size: '1024x1024',
       usage: {
         total_tokens: 12
       },
@@ -783,11 +787,47 @@ test('worker resolves credential lease, calls upstream directly, uploads R2, and
   assert.equal(completed[0]?.status, 'succeeded');
   assert.deepEqual(completed[0]?.usage, { total_tokens: 12 });
   const result = completed[0]?.result as {
-    images: Array<{ url: string; mime_type: string }>;
+    images: Array<{
+      url: string;
+      mime_type: string;
+      format: string;
+      width: number;
+      height: number;
+      size_bytes: number;
+      filename: string;
+      revised_prompt: string;
+    }>;
+    output: {
+      created: number;
+      background: string;
+      output_format: string;
+      quality: string;
+      size: string;
+    };
+    metadata: {
+      image_count: number;
+    };
     raw_response: { data: Array<{ url: string; b64_json?: string }> };
     raw_response_truncated: boolean;
   };
   assert.equal(result.images[0]?.url, 'https://img.example.com/images/out.png');
+  assert.equal(result.images[0]?.mime_type, 'image/png');
+  assert.equal(result.images[0]?.format, 'png');
+  assert.equal(result.images[0]?.width, 1);
+  assert.equal(result.images[0]?.height, 1);
+  assert.equal(result.images[0]?.size_bytes, Buffer.from(tinyPngBase64, 'base64').length);
+  assert.equal(result.images[0]?.filename, 'out.png');
+  assert.equal(result.images[0]?.revised_prompt, 'a cyberpunk city');
+  assert.deepEqual(result.output, {
+    created: 123,
+    background: 'opaque',
+    output_format: 'png',
+    quality: 'high',
+    size: '1024x1024'
+  });
+  assert.deepEqual(result.metadata, {
+    image_count: 1
+  });
   assert.equal(result.raw_response.data[0]?.url, 'https://img.example.com/images/out.png');
   assert.equal(result.raw_response.data[0]?.b64_json, undefined);
   assert.equal(result.raw_response_truncated, false);
@@ -857,7 +897,7 @@ test('worker detects edit input URL MIME before forwarding multipart upstream', 
   const address = upstream.server.address();
   assert.ok(address && typeof address === 'object');
   const upstreamBaseUrl = `http://127.0.0.1:${(address as AddressInfo).port}`;
-  const completed: Array<{ status: string }> = [];
+  const completed: Array<{ status: string; result: Record<string, unknown> | null }> = [];
   const task = buildTask({
     operation: 'edit',
     input: {
@@ -874,7 +914,7 @@ test('worker detects edit input URL MIME before forwarding multipart upstream', 
   });
   const store = {
     claimTask: async () => task,
-    completeTask: async (args: { status: string }) => {
+    completeTask: async (args: { status: string; result: Record<string, unknown> | null }) => {
       completed.push(args);
       return undefined;
     },
@@ -910,6 +950,18 @@ test('worker detects edit input URL MIME before forwarding multipart upstream', 
   }
 
   assert.equal(completed[0]?.status, 'succeeded');
+  const result = completed[0]?.result as {
+    metadata: {
+      image_count: number;
+      input_image_count: number;
+      mask_used: boolean;
+    };
+  };
+  assert.deepEqual(result.metadata, {
+    image_count: 1,
+    input_image_count: 1,
+    mask_used: true
+  });
   assert.equal(received.imageMimeType, 'image/png');
   assert.equal(received.maskMimeType, 'image/png');
 });

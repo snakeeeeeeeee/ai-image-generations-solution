@@ -321,9 +321,27 @@ new-api 后续提交编辑图任务时使用响应里的 `images` 和 `mask`：
     "images": [
       {
         "url": "https://img.example.com/images/xxx.png",
-        "mime_type": "image/png"
+        "mime_type": "image/png",
+        "format": "png",
+        "width": 1024,
+        "height": 1024,
+        "size_bytes": 1234567,
+        "filename": "xxx.png",
+        "revised_prompt": "..."
       }
-    ]
+    ],
+    "output": {
+      "created": 1782581166,
+      "background": "opaque",
+      "output_format": "png",
+      "quality": "high",
+      "size": "1024x1024"
+    },
+    "metadata": {
+      "image_count": 1,
+      "input_image_count": 0,
+      "mask_used": false
+    }
   },
   "usage": {
     "total_tokens": 123
@@ -614,9 +632,27 @@ HMAC-SHA256(timestamp + "." + raw_body, callback_secret)
     "images": [
       {
         "url": "https://r2.xxx/a.png",
-        "mime_type": "image/png"
+        "mime_type": "image/png",
+        "format": "png",
+        "width": 1024,
+        "height": 1024,
+        "size_bytes": 1234567,
+        "filename": "a.png",
+        "revised_prompt": "..."
       }
-    ]
+    ],
+    "output": {
+      "created": 1782581166,
+      "background": "opaque",
+      "output_format": "png",
+      "quality": "high",
+      "size": "1024x1024"
+    },
+    "metadata": {
+      "image_count": 1,
+      "input_image_count": 0,
+      "mask_used": false
+    }
   },
   "usage": {
     "total_tokens": 123,
@@ -694,6 +730,16 @@ HMAC-SHA256(timestamp + "." + raw_body, callback_secret)
 - `upstream_error`：上游原始错误 JSON。
 
 `raw_response` 是安全版上游响应：保留有价值结构，但必须剔除 `b64_json`、base64 大字段、data URI 图片和超大 inline image。`RAW_RESPONSE_MAX_BYTES` 默认 `262144`。错误响应不会做业务隐藏；只有密钥、签名、base64 大字段这类不应外传的数据会被清理或省略。
+
+成功结果字段说明：
+
+- `result.images[].url`：image-handle 上传到 R2 后的稳定资源 URL。
+- `result.images[].mime_type/format/width/height/size_bytes`：image-handle 按最终图片内容解析得到。
+- `result.images[].filename`：从 R2 URL 中提取的文件名。
+- `result.images[].revised_prompt`：如果上游 `data[]` 返回则透传。
+- `result.output.created/background/output_format/quality/size`：从上游原始响应中提取的 OpenAI Images 常用输出字段。
+- `result.metadata.image_count`：本次输出图片数量。
+- `result.metadata.input_image_count/mask_used/input_fidelity`：编辑图执行元数据；`input_fidelity` 来自请求参数，不一定会在上游响应里出现。
 
 new-api 需要保证 callback 幂等：同一个 `client_task_id` 的终态通知重复到达时，不重复结算、不重复退款。
 
