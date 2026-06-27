@@ -803,6 +803,117 @@ test('worker resolves credential lease, calls upstream directly, uploads R2, and
   await upstream.close();
 });
 
+test('worker detects edit input URL MIME before forwarding multipart upstream', async () => {
+  const upstream = Fastify();
+  await upstream.register((await import('@fastify/multipart')).default);
+  const received: {
+    imageMimeType?: string;
+    maskMimeType?: string;
+  } = {};
+
+  upstream.post('/api/internal/image/credential-leases/lease_1/resolve', async () => ({
+    provider: 'openai_compatible',
+    request_format: 'openai_images',
+    base_url: upstreamBaseUrl,
+    api_key: 'sk-secret-upstream',
+    model: 'gpt-image-2',
+    channel_id: 'resolved_channel_123',
+    expires_at: new Date(Date.now() + 60_000).toISOString()
+  }));
+
+  upstream.get('/input.png', async (_request, reply) => reply
+    .header('content-type', 'application/octet-stream')
+    .send(Buffer.from(tinyPngBase64, 'base64')));
+
+  upstream.get('/mask.png', async (_request, reply) => reply
+    .header('content-type', 'application/octet-stream')
+    .send(Buffer.from(tinyPngBase64, 'base64')));
+
+  upstream.post('/images/edits', async (request) => {
+    for await (const part of request.parts()) {
+      if (part.type !== 'file') {
+        continue;
+      }
+      if (part.fieldname === 'image') {
+        received.imageMimeType = part.mimetype;
+      }
+      if (part.fieldname === 'mask') {
+        received.maskMimeType = part.mimetype;
+      }
+      await part.toBuffer();
+    }
+    return {
+      id: 'resp_edit_1',
+      created: 123,
+      data: [
+        {
+          b64_json: tinyPngBase64
+        }
+      ]
+    };
+  });
+
+  await upstream.listen({ port: 0, host: '127.0.0.1' });
+  const address = upstream.server.address();
+  assert.ok(address && typeof address === 'object');
+  const upstreamBaseUrl = `http://127.0.0.1:${(address as AddressInfo).port}`;
+  const completed: Array<{ status: string }> = [];
+  const task = buildTask({
+    operation: 'edit',
+    input: {
+      text: 'edit',
+      images: [`${upstreamBaseUrl}/input.png`],
+      mask: `${upstreamBaseUrl}/mask.png`
+    },
+    executor: {
+      type: 'provider_direct_lease',
+      lease_id: 'lease_1',
+      resolve_url: `${upstreamBaseUrl}/api/internal/image/credential-leases/lease_1/resolve`,
+      secret_id: 'image_handle_1'
+    }
+  });
+  const store = {
+    claimTask: async () => task,
+    completeTask: async (args: { status: string }) => {
+      completed.push(args);
+      return undefined;
+    },
+    retryTask: async () => false
+  };
+  const taskQueue = { add: async () => undefined };
+  const rateLimiter = { waitForToken: async () => undefined };
+  const limiter = { acquire: async () => () => undefined };
+  const upload = async () => 'https://img.example.com/images/out.png';
+  const dispatcher = new (await import('undici')).Agent();
+
+  try {
+    await processTask({
+      job: {
+        data: {
+          provider_task_id: 'imgtask_1'
+        }
+      } as never,
+      config: buildTestConfig({
+        credentialLeaseAllowedHosts: [`127.0.0.1:${(address as AddressInfo).port}`]
+      }),
+      store: store as never,
+      taskQueue: taskQueue as never,
+      rateLimiter: rateLimiter as never,
+      imageProcessingLimiter: limiter as never,
+      upstreamDispatcher: dispatcher,
+      r2Client: {} as never,
+      upload
+    });
+  } finally {
+    await dispatcher.close();
+    await upstream.close();
+  }
+
+  assert.equal(completed[0]?.status, 'succeeded');
+  assert.equal(received.imageMimeType, 'image/png');
+  assert.equal(received.maskMimeType, 'image/png');
+});
+
 test('worker writes requested base64 result to Redis only', async () => {
   const upstream = Fastify();
 

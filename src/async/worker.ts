@@ -17,6 +17,7 @@ import { uploadWithRetry } from '../upload-retry.js';
 import { uploadImageToR2 } from '../r2.js';
 import { genericOpenAICompatibleStrategy } from '../image-strategy.js';
 import { loadImageSource } from '../image-runner.js';
+import { readImageMetadata } from '../image.js';
 import { sanitizeRawResponse } from './raw-response.js';
 import {
   createWorkerRuntimeState,
@@ -469,7 +470,12 @@ async function buildEditPayloadFromUrls({
       config,
       dispatcher
     });
-    form.append('image', new Blob([buffer]), `image-${index + 1}.png`);
+    const metadata = readImageMetadata(buffer);
+    form.append(
+      'image',
+      new Blob([buffer], { type: metadata.mimeType }),
+      `image-${index + 1}.${metadata.extension}`
+    );
   }
 
   if (typeof task.input.mask === 'string' && task.input.mask.trim() !== '') {
@@ -478,7 +484,8 @@ async function buildEditPayloadFromUrls({
       config,
       dispatcher
     });
-    form.append('mask', new Blob([maskBuffer]), 'mask.png');
+    const metadata = readImageMetadata(maskBuffer);
+    form.append('mask', new Blob([maskBuffer], { type: metadata.mimeType }), `mask.${metadata.extension}`);
   }
 
   return {
