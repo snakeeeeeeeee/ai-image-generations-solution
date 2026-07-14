@@ -394,7 +394,7 @@ function buildResultImages(execution: ImageExecutionResult): TaskResultImage[] {
 function buildOutputPayload(upstreamResponse: unknown): Record<string, unknown> {
   const response = safeObject(upstreamResponse);
   const output: Record<string, unknown> = {};
-  for (const key of ['created', 'background', 'output_format', 'quality', 'size']) {
+  for (const key of ['created', 'background', 'output_format', 'quality', 'size', 'resolution']) {
     const value = response[key];
     if (['string', 'number', 'boolean'].includes(typeof value)) {
       output[key] = value;
@@ -623,7 +623,7 @@ function buildDirectJsonPayload({
 
 function buildRequestParams(body: Record<string, unknown>): Record<string, unknown> {
   const params: Record<string, unknown> = {};
-  for (const key of ['model', 'n', 'size', 'quality', 'output_format', 'output_compression']) {
+  for (const key of ['model', 'n', 'size', 'quality', 'resolution', 'output_format', 'output_compression']) {
     const value = body[key];
     if (['string', 'number', 'boolean'].includes(typeof value)) {
       params[key] = value;

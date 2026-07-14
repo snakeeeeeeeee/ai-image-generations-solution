@@ -203,6 +203,9 @@ test('POST /v1/images/generations uploads image and returns URL', async () => {
     payload: {
       model: 'gpt-image-2-count',
       prompt: 'test',
+      quality: 'high',
+      resolution: '2k',
+      n: 2,
       output_format: 'webp'
     }
   });
@@ -210,6 +213,9 @@ test('POST /v1/images/generations uploads image and returns URL', async () => {
   assert.equal(response.statusCode, 200);
   assert.equal(upstreamAuth, 'Bearer test-key');
   assert.equal(upstreamRequestBody?.size, '2560x1440');
+  assert.equal(upstreamRequestBody?.quality, 'high');
+  assert.equal(upstreamRequestBody?.resolution, '2k');
+  assert.equal(upstreamRequestBody?.n, 2);
   assert.equal(upstreamRequestBody?.output_format, 'png');
 
   const body = response.json() as { created: number; created_at_beijing: string; data: Array<{ url: string }> };
@@ -221,13 +227,15 @@ test('POST /v1/images/generations uploads image and returns URL', async () => {
   await upstream.close();
 });
 
-test('POST /v1/images/generations downloads xAI image URLs and uploads JPEG to R2', async () => {
+test('POST /v1/images/generations passes through xAI image URLs without download or R2 upload', async () => {
   const upstream = Fastify();
   let upstreamRequestBody: Record<string, unknown> | undefined;
   let imageUrl = '';
-  const uploaded: Array<{ key: string; contentType: string; bytes: number }> = [];
+  let imageGets = 0;
+  let uploadCalls = 0;
 
   upstream.get('/xai-generated.jpg', async (_request, reply) => {
+    imageGets += 1;
     reply.header('content-type', 'image/jpeg');
     return reply.send(tinyJpegBuffer);
   });
@@ -255,9 +263,9 @@ test('POST /v1/images/generations downloads xAI image URLs and uploads JPEG to R
   imageUrl = `http://127.0.0.1:${port}/xai-generated.jpg`;
 
   const app = buildServer(buildTestConfig(`http://127.0.0.1:${port}`), {
-    uploadImageToR2: async ({ key, contentType, buffer }) => {
-      uploaded.push({ key, contentType, bytes: buffer.length });
-      return `https://img.example.com/${key}`;
+    uploadImageToR2: async () => {
+      uploadCalls += 1;
+      return 'https://img.example.com/unexpected.jpg';
     }
   });
 
@@ -277,15 +285,13 @@ test('POST /v1/images/generations downloads xAI image URLs and uploads JPEG to R
   assert.equal(response.statusCode, 200);
   assert.equal(upstreamRequestBody?.size, undefined);
   assert.equal(upstreamRequestBody?.output_format, undefined);
-  assert.equal(uploaded.length, 2);
-  assert.equal(uploaded[0]?.contentType, 'image/jpeg');
-  assert.equal(uploaded[0]?.bytes, tinyJpegBuffer.length);
-  assert.match(uploaded[0]?.key ?? '', /^images\/\d{4}\/\d{2}\/\d{2}\/.+\.jpg$/);
+  assert.equal(imageGets, 0);
+  assert.equal(uploadCalls, 0);
 
   const body = response.json() as { data: Array<{ url: string }> };
   assert.equal(body.data.length, 2);
-  assert.match(body.data[0]?.url ?? '', /^https:\/\/img\.example\.com\/images\/\d{4}\/\d{2}\/\d{2}\/.+\.jpg$/);
-  assert.match(body.data[1]?.url ?? '', /^https:\/\/img\.example\.com\/images\/\d{4}\/\d{2}\/\d{2}\/.+\.jpg$/);
+  assert.equal(body.data[0]?.url, imageUrl);
+  assert.equal(body.data[1]?.url, imageUrl);
 
   await app.close();
   await upstream.close();
@@ -341,15 +347,11 @@ test('POST /v1/images/generations accepts xAI b64_json image responses', async (
   await upstream.close();
 });
 
-test('POST /v1/images/generations accepts GPT image URL responses', async () => {
+test('POST /v1/images/generations normalizes and passes through signed GPT image URLs', async () => {
   const upstream = Fastify();
-  let imageUrl = '';
-  const uploaded: Array<{ key: string; contentType: string; bytes: number }> = [];
-
-  upstream.get('/gpt-generated.png', async (_request, reply) => {
-    reply.header('content-type', 'image/png');
-    return reply.send(Buffer.from(tinyPngBase64, 'base64'));
-  });
+  const imageUrl = String.raw`https://signed.example.com/gpt-generated.png?x-resource-length=5408521\u0026X-Amz-Credential=AKIA%2F20260714%2Fus-west-2%2Fs3%2Faws4_request\u0026X-Amz-Signature=abc123`;
+  const expectedUrl = 'https://signed.example.com/gpt-generated.png?x-resource-length=5408521&X-Amz-Credential=AKIA%2F20260714%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Signature=abc123';
+  let uploadCalls = 0;
   upstream.post('/v1/images/generations', async () => ({
     created: 1780000000,
     data: [
@@ -364,12 +366,11 @@ test('POST /v1/images/generations accepts GPT image URL responses', async () => 
   const upstreamAddress = upstream.server.address();
   assert.ok(upstreamAddress && typeof upstreamAddress === 'object');
   const port = (upstreamAddress as AddressInfo).port;
-  imageUrl = `http://127.0.0.1:${port}/gpt-generated.png`;
 
   const app = buildServer(buildTestConfig(`http://127.0.0.1:${port}`), {
-    uploadImageToR2: async ({ key, contentType, buffer }) => {
-      uploaded.push({ key, contentType, bytes: buffer.length });
-      return `https://img.example.com/${key}`;
+    uploadImageToR2: async () => {
+      uploadCalls += 1;
+      return 'https://img.example.com/unexpected.png';
     }
   });
 
@@ -387,23 +388,22 @@ test('POST /v1/images/generations accepts GPT image URL responses', async () => 
   });
 
   assert.equal(response.statusCode, 200);
-  assert.equal(uploaded.length, 1);
-  assert.equal(uploaded[0]?.contentType, 'image/png');
-  assert.equal(uploaded[0]?.bytes, Buffer.from(tinyPngBase64, 'base64').length);
-  assert.match(uploaded[0]?.key ?? '', /^images\/\d{4}\/\d{2}\/\d{2}\/.+\.png$/);
+  assert.equal(uploadCalls, 0);
 
   const body = response.json() as { data: Array<{ url: string }> };
-  assert.match(body.data[0]?.url ?? '', /^https:\/\/img\.example\.com\/images\/\d{4}\/\d{2}\/\d{2}\/.+\.png$/);
+  assert.equal(body.data[0]?.url, expectedUrl);
 
   await app.close();
   await upstream.close();
 });
 
-test('POST /v1/images/generations rejects xAI image URL with non-image body', async () => {
+test('POST /v1/images/generations does not probe a passed-through URL body', async () => {
   const upstream = Fastify();
   let imageUrl = '';
+  let imageGets = 0;
 
   upstream.get('/not-image.txt', async (_request, reply) => {
+    imageGets += 1;
     reply.header('content-type', 'text/plain');
     return reply.send('not image');
   });
@@ -440,8 +440,10 @@ test('POST /v1/images/generations rejects xAI image URL with non-image body', as
     }
   });
 
-  assert.equal(response.statusCode, 502);
-  assert.equal(response.json().error.code, 'unsupported_image_format');
+  assert.equal(response.statusCode, 200);
+  assert.equal(imageGets, 0);
+  const body = response.json() as { data: Array<{ url: string }> };
+  assert.equal(body.data[0]?.url, imageUrl);
 
   await app.close();
   await upstream.close();
@@ -644,6 +646,9 @@ test('POST /v1/images/edits forwards JSON image edit request and returns URL', a
           image_url: 'https://example.com/input.png'
         }
       ],
+      quality: 'medium',
+      resolution: '2k',
+      n: 2,
       output_format: 'webp'
     }
   });
@@ -651,6 +656,9 @@ test('POST /v1/images/edits forwards JSON image edit request and returns URL', a
   assert.equal(response.statusCode, 200);
   assert.equal(upstreamAuth, 'Bearer test-key');
   assert.equal(upstreamRequestBody?.size, '2560x1440');
+  assert.equal(upstreamRequestBody?.quality, 'medium');
+  assert.equal(upstreamRequestBody?.resolution, '2k');
+  assert.equal(upstreamRequestBody?.n, 2);
   assert.equal(upstreamRequestBody?.output_format, 'png');
   assert.deepEqual(upstreamRequestBody?.image, [{ image_url: 'https://example.com/input.png' }]);
 
@@ -709,6 +717,9 @@ test('POST /v1/images/edits forwards multipart image edit request and returns UR
   const form = new FormData();
   form.append('model', 'gpt-image-2-count');
   form.append('prompt', 'edit test');
+  form.append('quality', 'high');
+  form.append('resolution', '4k');
+  form.append('n', '3');
   form.append('image', new Blob([Buffer.from('input-image')], { type: 'image/png' }), 'input.png');
 
   const response = await fetch(`http://127.0.0.1:${appPort}/v1/images/edits`, {
@@ -730,6 +741,9 @@ test('POST /v1/images/edits forwards multipart image edit request and returns UR
   assert.equal(received.model, 'gpt-image-2-count');
   assert.equal(received.prompt, 'edit test');
   assert.equal(received.size, '2560x1440');
+  assert.equal(received.quality, 'high');
+  assert.equal(received.resolution, '4k');
+  assert.equal(received.n, '3');
   assert.equal(received.output_format, 'png');
 
   const body = await response.json() as { data: Array<{ url: string }> };

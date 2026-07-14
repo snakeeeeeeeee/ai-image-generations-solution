@@ -140,7 +140,7 @@ function addParamIfPresent(params: Record<string, unknown>, key: string, value: 
 
 function buildRequestParamsFromBody(body: ImageRequestBody): Record<string, unknown> {
   const params: Record<string, unknown> = {};
-  for (const key of ['model', 'n', 'size', 'quality', 'output_format', 'output_compression']) {
+  for (const key of ['model', 'n', 'size', 'quality', 'resolution', 'output_format', 'output_compression']) {
     addParamIfPresent(params, key, body[key]);
   }
   return params;
@@ -148,7 +148,7 @@ function buildRequestParamsFromBody(body: ImageRequestBody): Record<string, unkn
 
 function buildRequestParamsFromFields(fields: Map<string, string>): Record<string, unknown> {
   const params: Record<string, unknown> = {};
-  for (const key of ['model', 'n', 'size', 'quality', 'output_format', 'output_compression']) {
+  for (const key of ['model', 'n', 'size', 'quality', 'resolution', 'output_format', 'output_compression']) {
     addParamIfPresent(params, key, fields.get(key));
   }
   return params;
@@ -162,13 +162,17 @@ function addResponseParam(params: Record<string, unknown>, key: string, value: u
 
 function buildResponseParams(
   upstreamResponse: UpstreamImageResponse,
-  outputImages: Array<ImageMetadata & { sourceType: ImageSourceType }>,
-  strategy: ImageModelStrategy
+  outputImages: Array<(ImageMetadata & { sourceType: ImageSourceType }) | undefined>,
+  strategy: ImageModelStrategy,
+  sourceTypes: ImageSourceType[] = outputImages.flatMap((item) => item ? [item.sourceType] : [])
 ): Record<string, unknown> {
   const params: Record<string, unknown> = {};
   addResponseParam(params, 'created', upstreamResponse.created);
 
-  const firstImage = outputImages[0];
+  const knownImages = outputImages.filter(
+    (item): item is ImageMetadata & { sourceType: ImageSourceType } => item !== undefined
+  );
+  const firstImage = knownImages[0];
   if (firstImage) {
     params.format = firstImage.format;
     params.width = firstImage.width;
@@ -181,8 +185,8 @@ function buildResponseParams(
   }
   if (strategy.name !== 'gpt-image') {
     params.strategy = strategy.name;
-    params.formats = [...new Set(outputImages.map((item) => item.format))];
-    params.sourceTypes = [...new Set(outputImages.map((item) => item.sourceType))];
+    params.formats = [...new Set(knownImages.map((item) => item.format))];
+    params.sourceTypes = [...new Set(sourceTypes)];
   }
 
   return params;
@@ -936,7 +940,7 @@ export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyIn
       stopUpstreamTimeout = undefined;
 
       const outputData: Array<{ url: string }> = [];
-      const outputImages: Array<ImageMetadata & { sourceType: ImageSourceType }> = [];
+      const outputImages: Array<(ImageMetadata & { sourceType: ImageSourceType }) | undefined> = [];
       const imageSources = upstreamPayload.strategy.extractImages(upstreamResponse);
       if (imageSources.length === 0) {
         throw new AppError('new-api returned no image data', {
@@ -947,6 +951,12 @@ export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyIn
       }
 
       for (const source of imageSources) {
+        if (source.type === 'url') {
+          outputData.push({ url: source.value });
+          outputImages.push(undefined);
+          continue;
+        }
+
         const decodeStartedAt = performance.now();
         const buffer = await loadImageSource({
           source,
@@ -1004,7 +1014,12 @@ export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyIn
       }
       imageCount = outputData.length;
       imageUrls = outputData.map((item) => item.url);
-      responseParams = buildResponseParams(upstreamResponse, outputImages, upstreamPayload.strategy);
+      responseParams = buildResponseParams(
+        upstreamResponse,
+        outputImages,
+        upstreamPayload.strategy,
+        imageSources.map((source) => source.type)
+      );
 
       const totalMs = msSince(totalStartedAt);
       request.log.info({

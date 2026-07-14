@@ -38,10 +38,12 @@ export interface RunnerTimings {
   upload_ms: number;
 }
 
+export type OutputImageMetadata = ImageMetadata & { sourceType: ImageSourceType };
+
 export interface ImageExecutionResult {
   created: number;
   data: Array<{ url: string; mime_type?: string }>;
-  outputImages: Array<ImageMetadata & { sourceType: ImageSourceType }>;
+  outputImages: Array<OutputImageMetadata | undefined>;
   responseParams: Record<string, unknown>;
   requestParams: Record<string, unknown>;
   metadata: {
@@ -128,7 +130,7 @@ function addParamIfPresent(params: Record<string, unknown>, key: string, value: 
 
 export function buildRequestParamsFromBody(body: ImageRequestBody): Record<string, unknown> {
   const params: Record<string, unknown> = {};
-  for (const key of ['model', 'n', 'size', 'quality', 'output_format', 'output_compression']) {
+  for (const key of ['model', 'n', 'size', 'quality', 'resolution', 'output_format', 'output_compression']) {
     addParamIfPresent(params, key, body[key]);
   }
   return params;
@@ -142,13 +144,15 @@ function addResponseParam(params: Record<string, unknown>, key: string, value: u
 
 export function buildResponseParams(
   upstreamResponse: UpstreamImageResponse,
-  outputImages: Array<ImageMetadata & { sourceType: ImageSourceType }>,
-  strategy: ImageModelStrategy
+  outputImages: Array<OutputImageMetadata | undefined>,
+  strategy: ImageModelStrategy,
+  sourceTypes: ImageSourceType[] = outputImages.flatMap((item) => item ? [item.sourceType] : [])
 ): Record<string, unknown> {
   const params: Record<string, unknown> = {};
   addResponseParam(params, 'created', upstreamResponse.created);
 
-  const firstImage = outputImages[0];
+  const knownImages = outputImages.filter((item): item is OutputImageMetadata => item !== undefined);
+  const firstImage = knownImages[0];
   if (firstImage) {
     params.format = firstImage.format;
     params.width = firstImage.width;
@@ -161,8 +165,8 @@ export function buildResponseParams(
   }
   if (strategy.name !== 'gpt-image') {
     params.strategy = strategy.name;
-    params.formats = [...new Set(outputImages.map((item) => item.format))];
-    params.sourceTypes = [...new Set(outputImages.map((item) => item.sourceType))];
+    params.formats = [...new Set(knownImages.map((item) => item.format))];
+    params.sourceTypes = [...new Set(sourceTypes)];
   }
 
   return params;
@@ -237,9 +241,25 @@ function safeJsonForLog(value: unknown): unknown {
       output[key] = '[redacted]';
       continue;
     }
+    if ((lower === 'url' || lower.endsWith('_url')) && typeof item === 'string') {
+      output[key] = redactUrlQueryForLog(item);
+      continue;
+    }
     output[key] = safeJsonForLog(item);
   }
   return output;
+}
+
+function redactUrlQueryForLog(value: string): string {
+  try {
+    const url = new URL(value);
+    if (!url.search) {
+      return value;
+    }
+    return `${url.origin}${url.pathname}?query=[redacted]`;
+  } catch {
+    return '[redacted url]';
+  }
 }
 
 function bodyForLog(body: string | FormData): unknown {
@@ -632,7 +652,7 @@ export async function executeUpstreamPayload({
   timings.openai_ms = msSince(upstreamStartedAt);
 
   const outputData: Array<{ url: string; mime_type?: string }> = [];
-  const outputImages: Array<ImageMetadata & { sourceType: ImageSourceType }> = [];
+  const outputImages: Array<OutputImageMetadata | undefined> = [];
   const imageSources = payload.strategy.extractImages(upstreamResponse);
   if (imageSources.length === 0) {
     throw new AppError('new-api returned no image data', {
@@ -662,7 +682,12 @@ export async function executeUpstreamPayload({
     created,
     data: outputData,
     outputImages,
-    responseParams: buildResponseParams(upstreamResponse, outputImages, payload.strategy),
+    responseParams: buildResponseParams(
+      upstreamResponse,
+      outputImages,
+      payload.strategy,
+      imageSources.map((source) => source.type)
+    ),
     requestParams: payload.requestParams,
     metadata: payload.metadata,
     timings,
@@ -682,12 +707,12 @@ export async function uploadImageSources({
   upload = uploadImageToR2
 }: UploadImageSourcesOptions): Promise<{
   data: Array<{ url: string; mime_type?: string }>;
-  outputImages: Array<ImageMetadata & { sourceType: ImageSourceType }>;
+  outputImages: Array<OutputImageMetadata | undefined>;
   timings: Pick<RunnerTimings, 'decode_ms' | 'upload_ms'>;
   imageBytes: number;
 }> {
   const outputData: Array<{ url: string; mime_type?: string }> = [];
-  const outputImages: Array<ImageMetadata & { sourceType: ImageSourceType }> = [];
+  const outputImages: Array<OutputImageMetadata | undefined> = [];
   const timings = {
     decode_ms: 0,
     upload_ms: 0
@@ -695,6 +720,15 @@ export async function uploadImageSources({
   let totalImageBytes = 0;
 
   for (const source of sources) {
+    if (source.type === 'url') {
+      outputData.push({
+        url: source.value,
+        ...(source.declaredMimeType ? { mime_type: source.declaredMimeType } : {})
+      });
+      outputImages.push(undefined);
+      continue;
+    }
+
     const decodeStartedAt = performance.now();
     const buffer = await loadImageSource({
       source,

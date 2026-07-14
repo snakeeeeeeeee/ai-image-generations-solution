@@ -565,7 +565,10 @@ test('successful image requests are recorded without prompt or authorization', a
     payload: {
       model: 'gpt-image-2-count',
       prompt: 'do not save me',
-      size: '2560x1440'
+      size: '2560x1440',
+      quality: 'high',
+      resolution: '2k',
+      n: 2
     }
   });
   assert.equal(response.statusCode, 200);
@@ -578,7 +581,10 @@ test('successful image requests are recorded without prompt or authorization', a
   assert.equal(records[0]?.size, '2560x1440');
   assert.deepEqual(records[0]?.requestParams, {
     model: 'gpt-image-2-count',
+    n: 2,
     size: '2560x1440',
+    quality: 'high',
+    resolution: '2k',
     output_format: 'png'
   });
   assert.deepEqual(records[0]?.responseParams, {
@@ -599,11 +605,14 @@ test('successful image requests are recorded without prompt or authorization', a
   await upstream.close();
 });
 
-test('xAI URL image requests are recorded with R2 image URLs', async () => {
+test('xAI URL image requests are recorded as passthrough URLs', async () => {
   const upstream = Fastify();
   let imageUrl = '';
+  let imageGets = 0;
+  let uploadCalls = 0;
 
   upstream.get('/xai-generated.jpg', async (_request, reply) => {
+    imageGets += 1;
     reply.header('content-type', 'image/jpeg');
     return reply.send(tinyJpegBuffer);
   });
@@ -626,7 +635,10 @@ test('xAI URL image requests are recorded with R2 image URLs', async () => {
   const store = new AdminStore(':memory:');
   const app = buildServer(buildTestConfig(`http://127.0.0.1:${port}`), {
     adminStore: store,
-    uploadImageToR2: async ({ key }) => `https://img.example.com/${key}`
+    uploadImageToR2: async () => {
+      uploadCalls += 1;
+      return 'https://img.example.com/unexpected.jpg';
+    }
   });
 
   const response = await app.inject({
@@ -647,10 +659,11 @@ test('xAI URL image requests are recorded with R2 image URLs', async () => {
   assert.equal(records[0]?.success, true);
   assert.equal(records[0]?.model, 'grok-imagine-image');
   assert.equal(records[0]?.imageCount, 1);
-  assert.equal(records[0]?.imageBytes, tinyJpegBuffer.length);
-  assert.match(records[0]?.imageUrls[0] ?? '', /^https:\/\/img\.example\.com\/images\/\d{4}\/\d{2}\/\d{2}\/.+\.jpg$/);
-  assert.equal(JSON.stringify(records).includes(imageUrl), false);
-  assert.deepEqual(records[0]?.responseParams?.formats, ['jpeg']);
+  assert.equal(records[0]?.imageBytes, 0);
+  assert.equal(records[0]?.imageUrls[0], imageUrl);
+  assert.equal(imageGets, 0);
+  assert.equal(uploadCalls, 0);
+  assert.deepEqual(records[0]?.responseParams?.formats, []);
   assert.deepEqual(records[0]?.responseParams?.sourceTypes, ['url']);
   assert.equal(records[0]?.responseParams?.strategy, 'xai-grok-imagine');
 

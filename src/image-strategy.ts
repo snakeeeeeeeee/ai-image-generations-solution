@@ -65,6 +65,33 @@ function getDeclaredMimeType(item: StrategyUpstreamImageItem): string | undefine
   return getString(item.mime_type) ?? getString(item.mimeType);
 }
 
+export function normalizeUpstreamImageUrl(value: string): string {
+  // A valid JSON \u0026 is decoded by JSON.parse. This handles providers that
+  // double-escape it while preserving signed percent-encoded query values.
+  const normalized = value.replace(/\\u0026/gi, '&');
+  let url: URL;
+  try {
+    url = new URL(normalized);
+  } catch (error) {
+    throw new AppError('Upstream image URL is invalid', {
+      statusCode: 502,
+      type: 'server_error',
+      code: 'invalid_image_url',
+      cause: error
+    });
+  }
+
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new AppError('Upstream image URL protocol is unsupported', {
+      statusCode: 502,
+      type: 'server_error',
+      code: 'unsupported_image_url_protocol'
+    });
+  }
+
+  return normalized;
+}
+
 function extractUrlOrBase64(response: StrategyUpstreamImageResponse): ImageSource[] {
   return getData(response).map((item) => {
     const b64Json = getString(item.b64_json);
@@ -80,7 +107,7 @@ function extractUrlOrBase64(response: StrategyUpstreamImageResponse): ImageSourc
     if (url) {
       return {
         type: 'url',
-        value: url,
+        value: normalizeUpstreamImageUrl(url),
         declaredMimeType: getDeclaredMimeType(item)
       };
     }

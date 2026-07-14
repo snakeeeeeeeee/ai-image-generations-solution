@@ -8,6 +8,7 @@ import { extractBase64TaskResult } from '../src/async/base64-result.js';
 import { flushCallbacks } from '../src/async/notifier.js';
 import { sanitizeRawResponse } from '../src/async/raw-response.js';
 import { processTask } from '../src/async/worker.js';
+import { uploadImageSources } from '../src/image-runner.js';
 import { registerAsyncTaskRoutes } from '../src/async/routes.js';
 import type { AsyncTaskRecord } from '../src/async/types.js';
 
@@ -100,13 +101,16 @@ test('async task request requires provider_direct_lease executor', () => {
   const request = normalizeAsyncTaskRequest({
     request_id: 'req_1',
     client_task_id: 'task_1',
-    model: 'gpt-image-2',
+    model: 'adobe-gpt-image-2-count',
     operation: 'generation',
     input: {
       text: 'a cyberpunk city'
     },
     parameters: {
       size: '2048x2048',
+      quality: 'high',
+      resolution: '2k',
+      n: 3,
       output_format: 'webp'
     },
     executor: {
@@ -117,9 +121,15 @@ test('async task request requires provider_direct_lease executor', () => {
     }
   });
 
-  assert.equal(request.model, 'gpt-image-2');
+  assert.equal(request.model, 'adobe-gpt-image-2-count');
   assert.equal(request.input.text, 'a cyberpunk city');
-  assert.equal(request.parameters?.size, '2048x2048');
+  assert.deepEqual(request.parameters, {
+    size: '2048x2048',
+    quality: 'high',
+    resolution: '2k',
+    n: 3,
+    output_format: 'webp'
+  });
   assert.equal(request.executor.type, 'provider_direct_lease');
   assert.equal(request.executor.lease_id, 'lease_1');
   assert.equal(request.executor.secret_id, 'image_handle_1');
@@ -244,7 +254,9 @@ function buildRoutePayload(clientTaskId = 'task_1'): Record<string, unknown> {
     },
     parameters: {
       size: '1024x1024',
-      n: 1
+      quality: 'medium',
+      resolution: '2k',
+      n: 2
     },
     executor: {
       type: 'provider_direct_lease',
@@ -427,10 +439,12 @@ test('async task route marks task submission mode as async', async () => {
   const app = Fastify();
   const task = buildTask();
   let submittedMetadata: Record<string, unknown> | undefined;
+  let submittedParameters: Record<string, unknown> | undefined;
   let addCalls = 0;
   const store = {
-    createTask: async (request: { metadata?: Record<string, unknown> }) => {
+    createTask: async (request: { metadata?: Record<string, unknown>; parameters?: Record<string, unknown> }) => {
       submittedMetadata = request.metadata;
+      submittedParameters = request.parameters;
       return {
         task,
         created: true
@@ -463,6 +477,12 @@ test('async task route marks task submission mode as async', async () => {
   assert.equal(response.statusCode, 202);
   assert.equal(addCalls, 1);
   assert.equal(submittedMetadata?.submission_mode, 'async');
+  assert.deepEqual(submittedParameters, {
+    size: '1024x1024',
+    quality: 'medium',
+    resolution: '2k',
+    n: 2
+  });
 
   await app.close();
 });
@@ -609,8 +629,11 @@ test('base64 result extractor enforces 100MB payload limit', () => {
   }, 32), /100MB/);
 });
 
-test('worker resolves credential lease, calls upstream directly, uploads R2, and stores safe callback payload', async () => {
+test('worker resolves credential lease and passes through a signed URL without download or R2 upload', async () => {
   const upstream = Fastify();
+  const upstreamImageUrl = String.raw`https://signed.example.com/out.png?x-resource-length=5408521\u0026X-Amz-Credential=AKIA_TEST%2F20260714%2Fus-west-2%2Fs3%2Faws4_request\u0026X-Amz-Signature=secret-signature`;
+  const expectedImageUrl = 'https://signed.example.com/out.png?x-resource-length=5408521&X-Amz-Credential=AKIA_TEST%2F20260714%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Signature=secret-signature';
+  let uploadCalls = 0;
   const received: {
     resolveSignature?: string;
     resolveSecretId?: string;
@@ -646,22 +669,18 @@ test('worker resolves credential lease, calls upstream directly, uploads R2, and
       output_format: 'png',
       quality: 'high',
       size: '1024x1024',
+      resolution: '2k',
       usage: {
         total_tokens: 12
       },
       data: [
         {
-          url: `${upstreamBaseUrl}/mock-output.png`,
+          url: upstreamImageUrl,
+          mime_type: 'image/png',
           revised_prompt: 'a cyberpunk city'
         }
       ]
     };
-  });
-
-  upstream.get('/mock-output.png', async (_request, reply) => {
-    return reply
-      .header('content-type', 'image/png')
-      .send(Buffer.from(tinyPngBase64, 'base64'));
   });
 
   await upstream.listen({ port: 0, host: '127.0.0.1' });
@@ -682,7 +701,7 @@ test('worker resolves credential lease, calls upstream directly, uploads R2, and
     request_id: 'req_1',
     provider_api_key_hash: 'hash',
     provider: 'provider_direct_lease',
-    model: 'gpt-image-2',
+    model: 'adobe-gpt-image-2-count',
     operation: 'generation',
     status: 'queued',
     input: {
@@ -690,7 +709,9 @@ test('worker resolves credential lease, calls upstream directly, uploads R2, and
     },
     parameters: {
       size: '1024x1024',
-      n: 1
+      quality: 'high',
+      resolution: '2k',
+      n: 2
     },
     provider_options: {},
     executor: {
@@ -737,7 +758,10 @@ test('worker resolves credential lease, calls upstream directly, uploads R2, and
   const limiter = {
     acquire: async () => () => undefined
   };
-  const upload = async () => 'https://img.example.com/images/out.png';
+  const upload = async () => {
+    uploadCalls += 1;
+    return 'https://img.example.com/images/unexpected.png';
+  };
 
   const dispatcher = new (await import('undici')).Agent();
   const logs: string[] = [];
@@ -774,7 +798,7 @@ test('worker resolves credential lease, calls upstream directly, uploads R2, and
     client_task_id: 'task_1',
     attempt: 1,
     operation: 'generation',
-    model: 'gpt-image-2'
+    model: 'adobe-gpt-image-2-count'
   });
   assert.equal(received.upstreamAuthorization, 'Bearer sk-secret-upstream');
   assert.deepEqual(received.rateLimitRequest, {
@@ -783,18 +807,28 @@ test('worker resolves credential lease, calls upstream directly, uploads R2, and
     channelId: 'resolved_channel_123'
   });
   assert.equal((received.upstreamBody as { model?: string }).model, 'gpt-image-2');
+  assert.deepEqual(received.upstreamBody, {
+    model: 'gpt-image-2',
+    prompt: 'a cyberpunk city',
+    size: '1024x1024',
+    quality: 'high',
+    resolution: '2k',
+    n: 2,
+    output_format: 'png'
+  });
   assert.equal(completed.length, 1);
   assert.equal(completed[0]?.status, 'succeeded');
   assert.deepEqual(completed[0]?.usage, { total_tokens: 12 });
+  assert.equal(uploadCalls, 0);
   const result = completed[0]?.result as {
     images: Array<{
       url: string;
       mime_type: string;
-      format: string;
-      width: number;
-      height: number;
-      size_bytes: number;
-      filename: string;
+      format?: string;
+      width?: number;
+      height?: number;
+      size_bytes?: number;
+      filename?: string;
       revised_prompt: string;
     }>;
     output: {
@@ -803,6 +837,7 @@ test('worker resolves credential lease, calls upstream directly, uploads R2, and
       output_format: string;
       quality: string;
       size: string;
+      resolution: string;
     };
     metadata: {
       image_count: number;
@@ -810,25 +845,26 @@ test('worker resolves credential lease, calls upstream directly, uploads R2, and
     raw_response: { data: Array<{ url: string; b64_json?: string }> };
     raw_response_truncated: boolean;
   };
-  assert.equal(result.images[0]?.url, 'https://img.example.com/images/out.png');
+  assert.equal(result.images[0]?.url, expectedImageUrl);
   assert.equal(result.images[0]?.mime_type, 'image/png');
-  assert.equal(result.images[0]?.format, 'png');
-  assert.equal(result.images[0]?.width, 1);
-  assert.equal(result.images[0]?.height, 1);
-  assert.equal(result.images[0]?.size_bytes, Buffer.from(tinyPngBase64, 'base64').length);
-  assert.equal(result.images[0]?.filename, 'out.png');
+  assert.equal(result.images[0]?.format, undefined);
+  assert.equal(result.images[0]?.width, undefined);
+  assert.equal(result.images[0]?.height, undefined);
+  assert.equal(result.images[0]?.size_bytes, undefined);
+  assert.equal(result.images[0]?.filename, undefined);
   assert.equal(result.images[0]?.revised_prompt, 'a cyberpunk city');
   assert.deepEqual(result.output, {
     created: 123,
     background: 'opaque',
     output_format: 'png',
     quality: 'high',
-    size: '1024x1024'
+    size: '1024x1024',
+    resolution: '2k'
   });
   assert.deepEqual(result.metadata, {
     image_count: 1
   });
-  assert.equal(result.raw_response.data[0]?.url, 'https://img.example.com/images/out.png');
+  assert.equal(result.raw_response.data[0]?.url, expectedImageUrl);
   assert.equal(result.raw_response.data[0]?.b64_json, undefined);
   assert.equal(result.raw_response_truncated, false);
   assert.equal(JSON.stringify(completed[0]).includes('sk-secret-upstream'), false);
@@ -837,10 +873,60 @@ test('worker resolves credential lease, calls upstream directly, uploads R2, and
   assert.match(joinedLogs, /\/images\/generations/);
   assert.match(joinedLogs, /response_body/);
   assert.match(joinedLogs, /gpt-image-2/);
+  assert.match(joinedLogs, /signed\.example\.com\/out\.png\?query=\[redacted\]/);
   assert.equal(joinedLogs.includes('sk-secret-upstream'), false);
+  assert.equal(joinedLogs.includes('AKIA_TEST'), false);
+  assert.equal(joinedLogs.includes('secret-signature'), false);
+  assert.equal(joinedLogs.includes('x-resource-length=5408521'), false);
 
   await dispatcher.close();
   await upstream.close();
+});
+
+test('mixed URL and base64 outputs preserve order and upload only base64', async () => {
+  const dispatcher = new (await import('undici')).Agent();
+  let uploadCalls = 0;
+  try {
+    const result = await uploadImageSources({
+      sources: [
+        {
+          type: 'url',
+          value: 'https://signed.example.com/first.png?x=1&signature=abc',
+          declaredMimeType: 'image/png'
+        },
+        {
+          type: 'base64',
+          value: tinyPngBase64
+        }
+      ],
+      allowedFormats: ['png'],
+      config: buildTestConfig(),
+      dispatcher,
+      r2Client: {} as never,
+      upload: async () => {
+        uploadCalls += 1;
+        return 'https://img.example.com/second.png';
+      }
+    });
+
+    assert.equal(uploadCalls, 1);
+    assert.deepEqual(result.data, [
+      {
+        url: 'https://signed.example.com/first.png?x=1&signature=abc',
+        mime_type: 'image/png'
+      },
+      {
+        url: 'https://img.example.com/second.png',
+        mime_type: 'image/png'
+      }
+    ]);
+    assert.equal(result.outputImages[0], undefined);
+    assert.equal(result.outputImages[1]?.sourceType, 'base64');
+    assert.equal(result.outputImages[1]?.format, 'png');
+    assert.equal(result.imageBytes, Buffer.from(tinyPngBase64, 'base64').length);
+  } finally {
+    await dispatcher.close();
+  }
 });
 
 test('worker detects edit input URL MIME before forwarding multipart upstream', async () => {
@@ -849,7 +935,8 @@ test('worker detects edit input URL MIME before forwarding multipart upstream', 
   const received: {
     imageMimeType?: string;
     maskMimeType?: string;
-  } = {};
+    fields: Record<string, string>;
+  } = { fields: {} };
 
   upstream.post('/api/internal/image/credential-leases/lease_1/resolve', async () => ({
     provider: 'openai_compatible',
@@ -872,6 +959,7 @@ test('worker detects edit input URL MIME before forwarding multipart upstream', 
   upstream.post('/images/edits', async (request) => {
     for await (const part of request.parts()) {
       if (part.type !== 'file') {
+        received.fields[part.fieldname] = String(part.value);
         continue;
       }
       if (part.fieldname === 'image') {
@@ -885,6 +973,9 @@ test('worker detects edit input URL MIME before forwarding multipart upstream', 
     return {
       id: 'resp_edit_1',
       created: 123,
+      quality: 'medium',
+      size: '2048x2048',
+      resolution: '4k',
       data: [
         {
           b64_json: tinyPngBase64
@@ -899,11 +990,18 @@ test('worker detects edit input URL MIME before forwarding multipart upstream', 
   const upstreamBaseUrl = `http://127.0.0.1:${(address as AddressInfo).port}`;
   const completed: Array<{ status: string; result: Record<string, unknown> | null }> = [];
   const task = buildTask({
+    model: 'adobe-gpt-image-2-count',
     operation: 'edit',
     input: {
       text: 'edit',
       images: [`${upstreamBaseUrl}/input.png`],
       mask: `${upstreamBaseUrl}/mask.png`
+    },
+    parameters: {
+      size: '2048x2048',
+      quality: 'medium',
+      resolution: '4k',
+      n: 3
     },
     executor: {
       type: 'provider_direct_lease',
@@ -951,6 +1049,11 @@ test('worker detects edit input URL MIME before forwarding multipart upstream', 
 
   assert.equal(completed[0]?.status, 'succeeded');
   const result = completed[0]?.result as {
+    output: {
+      quality: string;
+      size: string;
+      resolution: string;
+    };
     metadata: {
       image_count: number;
       input_image_count: number;
@@ -962,8 +1065,22 @@ test('worker detects edit input URL MIME before forwarding multipart upstream', 
     input_image_count: 1,
     mask_used: true
   });
+  assert.deepEqual(result.output, {
+    created: 123,
+    quality: 'medium',
+    size: '2048x2048',
+    resolution: '4k'
+  });
   assert.equal(received.imageMimeType, 'image/png');
   assert.equal(received.maskMimeType, 'image/png');
+  assert.deepEqual(received.fields, {
+    size: '2048x2048',
+    quality: 'medium',
+    resolution: '4k',
+    n: '3',
+    model: 'gpt-image-2',
+    prompt: 'edit'
+  });
 });
 
 test('worker writes requested base64 result to Redis only', async () => {
