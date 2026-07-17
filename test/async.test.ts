@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import Fastify from 'fastify';
 import type { AddressInfo } from 'node:net';
 import type { AppConfig } from '../src/config.js';
+import { fingerprintAsyncTaskRequest } from '../src/async/fingerprint.js';
 import { normalizeAsyncTaskRequest } from '../src/async/request.js';
 import { extractBase64TaskResult } from '../src/async/base64-result.js';
 import { flushCallbacks } from '../src/async/notifier.js';
@@ -32,6 +33,7 @@ function buildTestConfig(overrides: Partial<AppConfig['asyncTasks']> = {}): AppC
       image_handle_1: 'internal-secret'
     },
     credentialLeaseAllowedHosts: ['127.0.0.1:1'],
+    imageUrlAllowPrivateNetwork: true,
     rawResponseMaxBytes: 256 * 1024,
     syncTaskTimeoutMs: 5 * 60 * 1000,
     syncTaskPollIntervalMs: 500,
@@ -130,10 +132,55 @@ test('async task request requires provider_direct_lease executor', () => {
     n: 3,
     output_format: 'webp'
   });
+  assert.deepEqual(request.provider_options, {});
   assert.equal(request.executor.type, 'provider_direct_lease');
   assert.equal(request.executor.lease_id, 'lease_1');
   assert.equal(request.executor.secret_id, 'image_handle_1');
   assert.equal(request.result_data_format, 'url');
+});
+
+test('async task request parses provider_options', () => {
+  const request = normalizeAsyncTaskRequest({
+    ...buildRoutePayload(),
+    provider_options: {
+      response_format: 'url',
+      seed: 0
+    }
+  });
+
+  assert.deepEqual(request.provider_options, {
+    response_format: 'url',
+    seed: 0
+  });
+});
+
+test('async request fingerprint is stable and excludes transport fields', () => {
+  const first = normalizeAsyncTaskRequest({
+    ...buildRoutePayload(),
+    provider_options: { seed: 0, response_format: 'url' },
+    callback: { url: 'https://callback-a.example.com' }
+  });
+  const second = normalizeAsyncTaskRequest({
+    ...buildRoutePayload(),
+    request_id: 'req_2',
+    provider_options: { response_format: 'url', seed: 0 },
+    executor: {
+      type: 'provider_direct_lease',
+      lease_id: 'lease_2',
+      resolve_url: 'https://gateway.example.com/api/internal/image/credential-leases/lease_2/resolve',
+      secret_id: 'image_handle_2'
+    },
+    callback: { url: 'https://callback-b.example.com' }
+  });
+
+  assert.equal(fingerprintAsyncTaskRequest(first), fingerprintAsyncTaskRequest(second));
+  assert.notEqual(
+    fingerprintAsyncTaskRequest(first),
+    fingerprintAsyncTaskRequest({
+      ...second,
+      provider_options: { response_format: 'url', seed: 1 }
+    })
+  );
 });
 
 test('async task request accepts base64 result_data_format', () => {
@@ -212,6 +259,7 @@ function buildTask(overrides: Partial<AsyncTaskRecord> = {}): AsyncTaskRecord {
     provider_task_id: 'imgtask_1',
     client_task_id: 'task_1',
     request_id: 'req_1',
+    request_fingerprint: 'fingerprint',
     provider_api_key_hash: 'hash',
     provider: 'provider_direct_lease',
     model: 'gpt-image-2',

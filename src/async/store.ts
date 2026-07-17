@@ -10,6 +10,8 @@ import type {
   CallbackEventRecord
 } from './types.js';
 import { PROVIDER_DIRECT_LEASE_EXECUTOR } from './types.js';
+import { fingerprintAsyncTaskRequest } from './fingerprint.js';
+import { AppError } from '../errors.js';
 
 const { Pool } = pg;
 const MIGRATION_LOCK_ID = 2026062201;
@@ -20,6 +22,7 @@ interface TaskRow {
   provider_task_id: string;
   client_task_id: string;
   request_id: string;
+  request_fingerprint: string;
   provider_api_key_hash: string;
   provider: string;
   model: string;
@@ -154,6 +157,7 @@ export class AsyncTaskStore {
           provider_task_id TEXT PRIMARY KEY,
           client_task_id TEXT NOT NULL,
           request_id TEXT NOT NULL,
+          request_fingerprint TEXT NOT NULL DEFAULT '',
           provider_api_key_hash TEXT NOT NULL,
           provider TEXT NOT NULL,
           model TEXT NOT NULL,
@@ -205,6 +209,10 @@ export class AsyncTaskStore {
         ALTER TABLE image_tasks
           ADD COLUMN IF NOT EXISTS executor_json JSONB NOT NULL DEFAULT '{}'::jsonb
       `);
+      await client.query(`
+        ALTER TABLE image_tasks
+          ADD COLUMN IF NOT EXISTS request_fingerprint TEXT NOT NULL DEFAULT ''
+      `);
       await client.query('COMMIT');
     } catch (error) {
       await client.query('ROLLBACK');
@@ -217,11 +225,13 @@ export class AsyncTaskStore {
   async createTask(request: AsyncTaskRequest, providerApiKey: string): Promise<CreateTaskResult> {
     const providerTaskId = `imgtask_${randomUUID()}`;
     const keyHash = hashProviderApiKey(providerApiKey);
+    const requestFingerprint = fingerprintAsyncTaskRequest(request);
     const result = await this.pool.query<TaskRow>(`
       INSERT INTO image_tasks (
         provider_task_id,
         client_task_id,
         request_id,
+        request_fingerprint,
         provider_api_key_hash,
         provider,
         model,
@@ -234,7 +244,7 @@ export class AsyncTaskStore {
         callback_json,
         metadata_json
       ) VALUES (
-        $1, $2, $3, $4, $5, $6, $7, 'queued', $8, $9, $10, $11, $12, $13
+        $1, $2, $3, $4, $5, $6, $7, $8, 'queued', $9, $10, $11, $12, $13, $14
       )
       ON CONFLICT (provider_api_key_hash, client_task_id) DO NOTHING
       RETURNING *
@@ -242,13 +252,14 @@ export class AsyncTaskStore {
       providerTaskId,
       request.client_task_id,
       request.request_id,
+      requestFingerprint,
       keyHash,
       PROVIDER_DIRECT_LEASE_EXECUTOR,
       request.model,
       request.operation,
       request.input ?? {},
       request.parameters ?? {},
-      {},
+      request.provider_options ?? {},
       request.executor ?? {},
       request.callback ?? {},
       request.metadata ?? {}
@@ -264,6 +275,13 @@ export class AsyncTaskStore {
     const existing = await this.getTaskByClientTaskId(keyHash, request.client_task_id);
     if (!existing) {
       throw new Error('Task idempotency conflict could not be loaded');
+    }
+    if (existing.request_fingerprint !== requestFingerprint) {
+      throw new AppError('client_task_id was already used with a different request', {
+        statusCode: 409,
+        type: 'invalid_request_error',
+        code: 'idempotency_conflict'
+      });
     }
 
     return {
@@ -646,6 +664,7 @@ function mapTaskRow(row: TaskRow): AsyncTaskRecord {
     provider_task_id: row.provider_task_id,
     client_task_id: row.client_task_id,
     request_id: row.request_id,
+    request_fingerprint: row.request_fingerprint,
     provider_api_key_hash: row.provider_api_key_hash,
     provider: row.provider,
     model: row.model,

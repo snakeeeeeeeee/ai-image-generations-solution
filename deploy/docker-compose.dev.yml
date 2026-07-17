@@ -42,6 +42,7 @@ services:
     image: *app-image
     build: *app-build
     restart: unless-stopped
+    profiles: ["mock"]
     command: ["node", "dist/scripts/mock-new-api.js"]
     environment:
       MOCK_NEW_API_HOST: 0.0.0.0
@@ -49,6 +50,11 @@ services:
       MOCK_UPSTREAM_BASE_URL: http://mock-new-api:${MOCK_NEW_API_PORT:-3999}
     ports:
       - "${MOCK_NEW_API_HOST_PORT:-3999}:${MOCK_NEW_API_PORT:-3999}"
+    networks:
+      default:
+      image-handle-gateway:
+        aliases:
+          - mock-provider
 
   image-api:
     image: *app-image
@@ -59,8 +65,6 @@ services:
         condition: service_healthy
       image-handle-redis:
         condition: service_healthy
-      mock-new-api:
-        condition: service_started
     env_file:
       - ${IMAGE_HANDLE_ENV_FILE:-./.env}
     environment:
@@ -69,14 +73,18 @@ services:
       PORT: ${PORT:-8787}
       POSTGRES_URL: postgres://image_handle:image_handle@image-handle-postgres:5432/image_handle
       REDIS_URL: redis://image-handle-redis:6379
-      NEW_API_BASE_URL: http://mock-new-api:${MOCK_NEW_API_PORT:-3999}
-      PROVIDER_API_KEYS: ${PROVIDER_API_KEYS:-provider-test-key}
+      NEW_API_BASE_URL: http://new-api-dev:3000
+      PROVIDER_API_KEYS: local-image-handle-api-key
       UPSTREAM_API_KEY: ${UPSTREAM_API_KEY:-local-upstream-key}
-      CALLBACK_DEFAULT_SECRET: ${CALLBACK_DEFAULT_SECRET:-local-callback-secret}
-      CREDENTIAL_LEASE_SECRETS_JSON: ${CREDENTIAL_LEASE_SECRETS_JSON}
-      CREDENTIAL_LEASE_ALLOWED_HOSTS: ${CREDENTIAL_LEASE_ALLOWED_HOSTS:-mock-new-api:${MOCK_NEW_API_PORT:-3999}}
+      CALLBACK_DEFAULT_SECRET: local-image-handle-callback-secret
+      CREDENTIAL_LEASE_SECRETS_JSON: '{"image_handle_1":"local-image-handle-lease-secret"}'
+      CREDENTIAL_LEASE_ALLOWED_HOSTS: new-api-dev:3000
+      IMAGE_URL_ALLOW_PRIVATE_NETWORK: "true"
     ports:
       - "${IMAGE_API_HOST_PORT:-8787}:${PORT:-8787}"
+    networks:
+      - default
+      - image-handle-gateway
 
   image-worker:
     image: *app-image
@@ -87,20 +95,22 @@ services:
         condition: service_healthy
       image-handle-redis:
         condition: service_healthy
-      mock-new-api:
-        condition: service_started
     env_file:
       - ${IMAGE_HANDLE_ENV_FILE:-./.env}
     environment:
       IMAGE_HANDLE_ROLE: worker
       POSTGRES_URL: postgres://image_handle:image_handle@image-handle-postgres:5432/image_handle
       REDIS_URL: redis://image-handle-redis:6379
-      NEW_API_BASE_URL: http://mock-new-api:${MOCK_NEW_API_PORT:-3999}
-      PROVIDER_API_KEYS: ${PROVIDER_API_KEYS:-provider-test-key}
+      NEW_API_BASE_URL: http://new-api-dev:3000
+      PROVIDER_API_KEYS: local-image-handle-api-key
       UPSTREAM_API_KEY: ${UPSTREAM_API_KEY:-local-upstream-key}
-      CALLBACK_DEFAULT_SECRET: ${CALLBACK_DEFAULT_SECRET:-local-callback-secret}
-      CREDENTIAL_LEASE_SECRETS_JSON: ${CREDENTIAL_LEASE_SECRETS_JSON}
-      CREDENTIAL_LEASE_ALLOWED_HOSTS: ${CREDENTIAL_LEASE_ALLOWED_HOSTS:-mock-new-api:${MOCK_NEW_API_PORT:-3999}}
+      CALLBACK_DEFAULT_SECRET: local-image-handle-callback-secret
+      CREDENTIAL_LEASE_SECRETS_JSON: '{"image_handle_1":"local-image-handle-lease-secret"}'
+      CREDENTIAL_LEASE_ALLOWED_HOSTS: new-api-dev:3000
+      IMAGE_URL_ALLOW_PRIVATE_NETWORK: "true"
+    networks:
+      - default
+      - image-handle-gateway
 
   image-notifier:
     image: *app-image
@@ -117,9 +127,32 @@ services:
       IMAGE_HANDLE_ROLE: notifier
       POSTGRES_URL: postgres://image_handle:image_handle@image-handle-postgres:5432/image_handle
       REDIS_URL: redis://image-handle-redis:6379
-      PROVIDER_API_KEYS: ${PROVIDER_API_KEYS:-provider-test-key}
-      CALLBACK_DEFAULT_SECRET: ${CALLBACK_DEFAULT_SECRET:-local-callback-secret}
+      PROVIDER_API_KEYS: local-image-handle-api-key
+      CALLBACK_DEFAULT_SECRET: local-image-handle-callback-secret
+    networks:
+      - default
+      - image-handle-gateway
+
+  webhook-receiver:
+    image: *app-image
+    build: *app-build
+    restart: unless-stopped
+    profiles: ["e2e"]
+    command: ["node", "dist/scripts/webhook-receiver.js"]
+    environment:
+      WEBHOOK_RECEIVER_HOST: 0.0.0.0
+      WEBHOOK_RECEIVER_PORT: 4090
+    ports:
+      - "${WEBHOOK_RECEIVER_HOST_PORT:-4090}:4090"
+    networks:
+      - default
+      - image-handle-gateway
 
 volumes:
   image-handle-postgres-data:
   image-handle-redis-data:
+
+networks:
+  image-handle-gateway:
+    external: true
+    name: ${IMAGE_HANDLE_GATEWAY_NETWORK:-ai-gateway}

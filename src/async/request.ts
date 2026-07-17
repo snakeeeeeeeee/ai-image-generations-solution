@@ -61,6 +61,7 @@ export function normalizeAsyncTaskRequest(body: unknown): AsyncTaskRequest {
 
   const input = getObject(value.input, 'input');
   const parameters = getOptionalObject(value.parameters, 'parameters');
+  const providerOptions = getOptionalObject(value.provider_options, 'provider_options');
   const executor = parseExecutor(value.executor);
   const callback = getOptionalObject(value.callback, 'callback');
   const metadata = getOptionalObject(value.metadata, 'metadata');
@@ -81,6 +82,7 @@ export function normalizeAsyncTaskRequest(body: unknown): AsyncTaskRequest {
     result_data_format: resultDataFormat,
     input,
     parameters,
+    provider_options: providerOptions,
     executor,
     callback,
     metadata

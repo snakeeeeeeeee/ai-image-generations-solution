@@ -1,3 +1,4 @@
+import multipart from '@fastify/multipart';
 import Fastify from 'fastify';
 
 const port = Number.parseInt(process.env.MOCK_NEW_API_PORT || '3999', 10);
@@ -7,6 +8,7 @@ const upstreamBaseUrl = (process.env.MOCK_UPSTREAM_BASE_URL || `http://127.0.0.1
 const app = Fastify({
   logger: true
 });
+await app.register(multipart);
 
 // 一个极小的合法 PNG，用于验证解码、上传和公开 URL 流程。
 const tinyPngBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=';
@@ -104,6 +106,13 @@ app.post('/images/generations', async (request) => {
 });
 
 app.post('/images/edits', async (request) => {
+  if (request.isMultipart()) {
+    for await (const part of request.parts()) {
+      if (part.type === 'file') {
+        await part.toBuffer();
+      }
+    }
+  }
   request.log.info({
     authorization_present: Boolean(request.headers.authorization),
     content_type: request.headers['content-type']

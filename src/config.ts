@@ -69,6 +69,7 @@ export interface AsyncTaskConfig {
   callbackSecrets: Record<string, string>;
   credentialLeaseSecrets: Record<string, string>;
   credentialLeaseAllowedHosts: string[];
+  imageUrlAllowPrivateNetwork: boolean;
   rawResponseMaxBytes: number;
   syncTaskTimeoutMs: number;
   syncTaskPollIntervalMs: number;
@@ -263,6 +264,7 @@ export function loadConfig(): AppConfig {
       callbackSecrets: parseStringMapEnv('CALLBACK_SECRETS_JSON', '{}'),
       credentialLeaseSecrets: parseStringMapEnv('CREDENTIAL_LEASE_SECRETS_JSON', '{}'),
       credentialLeaseAllowedHosts: parseCsvEnv('CREDENTIAL_LEASE_ALLOWED_HOSTS', hostFromBaseUrl(normalizeBaseUrl(requireEnv('NEW_API_BASE_URL')))),
+      imageUrlAllowPrivateNetwork: parseBooleanEnv('IMAGE_URL_ALLOW_PRIVATE_NETWORK', false),
       rawResponseMaxBytes: parsePositiveInt('RAW_RESPONSE_MAX_BYTES', 256 * 1024),
       syncTaskTimeoutMs: parsePositiveInt('SYNC_TASK_TIMEOUT_MS', 5 * 60 * 1000),
       syncTaskPollIntervalMs: parsePositiveInt('SYNC_TASK_POLL_INTERVAL_MS', 500),

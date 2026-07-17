@@ -35,6 +35,7 @@ export interface AsyncTaskRequest {
   result_data_format: ResultDataFormat;
   input: AsyncTaskInput;
   parameters?: Record<string, unknown>;
+  provider_options?: Record<string, unknown>;
   executor: AsyncTaskExecutor;
   callback?: AsyncTaskCallback;
   metadata?: Record<string, unknown>;
@@ -44,6 +45,7 @@ export interface AsyncTaskRecord {
   provider_task_id: string;
   client_task_id: string;
   request_id: string;
+  request_fingerprint: string;
   provider_api_key_hash: string;
   provider: string;
   model: string;

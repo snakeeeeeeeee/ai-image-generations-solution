@@ -18,6 +18,7 @@ import {
   type ImageSourceType
 } from './image-strategy.js';
 import { uploadImageToR2 } from './r2.js';
+import { assertNoHttpRedirect, createPinnedHttpTarget } from './safe-url.js';
 
 export interface UpstreamImageItem {
   b64_json?: string;
@@ -531,7 +532,7 @@ async function readResponseBufferWithLimit(response: Response, limitBytes: numbe
 async function downloadImageUrl({
   source,
   config,
-  dispatcher
+  dispatcher: _dispatcher
 }: {
   source: ImageSource;
   config: AppConfig;
@@ -540,13 +541,16 @@ async function downloadImageUrl({
   const url = parseImageDownloadUrl(source.value);
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), config.upstream.timeoutMs);
+  const target = await createPinnedHttpTarget(url, config.asyncTasks.imageUrlAllowPrivateNetwork);
 
   try {
     const response = await undiciFetch(url, {
       method: 'GET',
       signal: controller.signal,
-      dispatcher
+      dispatcher: target.dispatcher,
+      redirect: 'manual'
     });
+    assertNoHttpRedirect(response);
     if (!response.ok) {
       throw new AppError('Upstream image URL download failed', {
         statusCode: 502,
@@ -567,6 +571,7 @@ async function downloadImageUrl({
     throw error;
   } finally {
     clearTimeout(timeout);
+    await target.close();
   }
 }
 
