@@ -1,0 +1,45 @@
+# Progress
+
+- 2026-07-17: Started Phase 11 for semantic idempotency, provider_options persistence, URL download security, and shared-network integration with new-api.
+- 2026-07-17: Added normalized `provider_options`, stable semantic SHA-256 fingerprints, PostgreSQL fingerprint persistence, and 409 conflicts for mismatched duplicate `client_task_id` submissions.
+- 2026-07-17: Added DNS/IP-pinned image URL downloads with redirect/private-network controls, updated shared-network Docker dev profiles, and resumed with code tests passing while full new-api Docker E2E remains pending.
+- 2026-07-17: Built image `image-handle:dev`, recreated API/worker/notifier plus mock and receiver profiles, and verified all services communicate with `new-api-dev` over `ai-gateway`.
+- 2026-07-17: Docker generation succeeded through a real credential lease and R2 upload. Added multipart parsing to the mock provider so the planned pre-upload-then-edit E2E can execute instead of stopping at Fastify 415.
+- 2026-07-17: Fixed Undici `all:true` pinned DNS lookup handling, added a real pinned-fetch regression, passed 72/72 tests, rebuilt the worker, and completed pre-uploaded edit plus signed success callback through new-api.
+- 2026-07-17: Completed shared-network gateway acceptance including new-api's deliberate failed-task/refund/Webhook path; restored the mock provider base URL after the test.
+- 2026-07-17: Final full `npm test` passed 72/72 after Docker E2E completion.
+- 2026-07-17: Removed the four disposable PostgreSQL task/outbox facts and their completed BullMQ jobs after final acceptance; production-like services remain healthy.
+- 2026-07-18: Reconciled the repository work records with the completed provider-direct lease, Bearer Webhook receiver, 72/72 test run, and shared-network E2E verification before committing the records.
+
+- 2026-05-29: Confirmed desired architecture and Cloudflare R2 setup with the user.
+- 2026-05-29: Started implementation plan for a new Node image wrapper service.
+- 2026-05-29: Switched implementation target to TypeScript at user request.
+- 2026-05-29: Installed dependencies and fixed initial TypeScript UUID parameter inference issue.
+- 2026-05-29: Added mock integration test for upstream proxying and R2 URL response.
+- 2026-05-29: `npm test` passed with 6 tests.
+- 2026-05-29: Started compiled service with dummy R2 credentials on port 8877 and verified `GET /healthz` returned `{"ok":true}`.
+- 2026-05-29: Added `npm run mock:new-api` for local smoke testing against real R2 without spending real image generation requests.
+- 2026-05-29: Diagnosed local smoke test failure as using the wrong Cloudflare token type for `R2_SECRET_ACCESS_KEY`; added concise R2 upload error handling.
+- 2026-05-29: Added PM2 ecosystem config and README deployment commands.
+- 2026-05-29: Removed concrete Cloudflare account id, bucket, and public domain values from README, `.env.example`, planning docs, and tests.
+- 2026-06-12: Started admin local image upload implementation. Scope: authenticated multipart upload, existing R2 key rule, URL response, and admin panel visibility.
+- 2026-06-12: Implemented `POST /image-wrapper/admin/api/upload`, `manual_upload` admin records, and an upload panel in the dashboard.
+- 2026-06-12: Verified with `npm test` (39 tests), `npm run build:admin`, and an in-app browser login/render check for the upload panel.
+- 2026-06-22: Started multi-node async task implementation with PostgreSQL task facts, Redis/BullMQ queue, role-based runtime, callback notifier, Docker Compose, and docs.
+- 2026-06-22: Added new-api alignment details: callback secret id header, batch grouping by `secret_id`, event payloads with `client_task_id`, and provider task IDs kept internal to new-api/image-handle.
+- 2026-06-22: `npm test` passed with 41 tests and `npm run build` passed. Docker Compose build was started but stopped after it stayed on Docker Hub base-image metadata pull for about two minutes with no progress.
+- 2026-06-22: Docker Compose verification completed after fixing BullMQ queue name (`image-tasks`) and copying `scripts/` into the Docker build context. Async smoke task reached `succeeded`, uploaded to R2, batch query returned the result, and mock-new-api received a delivered batch callback with `X-Callback-Secret-Id`.
+- 2026-06-22: Renamed callback headers from `X-NewAPI-*` to generic `X-Callback-*`. Unit tests pass; Docker rebuild for the renamed headers is pending because Docker Hub token fetch timed out again.
+- 2026-06-22: Moved deployment assets under `deploy/`, split default image-based Compose from the source-tree build override, and kept `deploy/.env` ignored so real R2 credentials are not committed.
+- 2026-06-22: Verified deploy compose configs using `deploy/.env.example` for default, build override, worker-only, and mock profile modes. `npm test` passed with 41 tests and `npm run build` passed. Docker image rebuild is blocked by Docker Hub auth token timeout, not by project code.
+- 2026-06-22: Split deployment into explicit `docker-compose.dev.yml`, `docker-compose.prod.yml`, and `docker-compose.worker.yml`, plus `.env.dev.example` and `.env.prod.example`, so development and production deployment paths are separate.
+- 2026-06-24: Implemented provider_direct_lease async execution path. `npm test` passed with 47 tests, `npm run build` passed, and compose config validation passed for dev/prod/worker examples. Docker dev image build is blocked by Docker Hub oauth token timeout while pulling `node:22-bookworm-slim`.
+- 2026-07-14: Started focused review of generation JSON, edit multipart, synchronous/asynchronous `quality`/`size`/`resolution`/`n` forwarding, and provider-direct lease model override for new-api image parameter pricing integration.
+- 2026-07-14: Added `resolution` to synchronous/shared request audit fields and expanded the admin audit test to cover all four image pricing parameters.
+- 2026-07-14: Completed image parameter contract verification. `npm test` passed 61/61, `npm run build` passed for admin and server, and `git diff --check` passed; no image pricing or static model mapping was added to image-handle.
+- 2026-07-14: Implemented configuration-free URL output passthrough for sync/async execution, residual JSON ampersand normalization, mixed URL/base64 ordering, optional local metadata, and signed-query debug redaction.
+- 2026-07-14: Rebuilt API/worker/notifier and completed live Adobe URL acceptance with `task_codex_url_token_1784007474`: explicit response format reached upstream, Adobe returned 200, the URL was not downloaded or mirrored to R2, and callback delivery succeeded.
+- 2026-07-14: Completed a second live count acceptance with `task_codex_url_count_1784008131`; configured default quality and explicit URL format reached upstream, and the signed URL passed through unchanged without R2.
+- 2026-07-14: Final `npm test` passed 66/66; runtime and pre-rebuild logs remain archived in new-api `tmp/codex-image-pricing/runtime-logs/`.
+- 2026-07-17: Started updating the E2E Webhook receiver fixture for new-api's single URL/Bearer-key contract; image-handle product code remains out of scope.
+- 2026-07-17: Completed the Bearer-key receiver fixture with configurable failure/success responses and event capture; full tests and shared-network new-api integration passed.

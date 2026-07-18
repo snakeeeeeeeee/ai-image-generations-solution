@@ -1,0 +1,33 @@
+# Findings
+
+- 2026-07-17 public Open API/Webhook work keeps image-handle internal. This repository will not deliver third-party Webhooks.
+- Before Phase 11, duplicate `client_task_id` submissions returned the existing task without comparing semantic request content, and normalized requests omitted `provider_options`. Phase 11 now persists both the normalized options and request fingerprint, returning 409 for conflicting duplicates.
+- Input image URL downloads now validate protocol, DNS results, resolved IP classes, and every redirect, then pin the validated address set in Undici to prevent DNS rebinding. Private-network access is disabled by default and can only be enabled explicitly for local Docker development.
+- The initial pinned DNS Agent returned a single-address callback even when Undici requested `all:true`, producing `ERR_INVALID_IP_ADDRESS`. Returning the complete one-time validated address set preserves rebinding protection and enables Node 22 IPv4/IPv6 fallback.
+- Shared-network Docker E2E completed against real new-api: generation, pre-uploaded edit, terminal success/failure callbacks, and the permanent-provider-error path all reached their expected terminal states without moving third-party Webhook delivery into image-handle.
+
+- Cloudflare R2 bucket is configured outside repository examples.
+- R2 custom domain is configured and active; exact value is intentionally not stored in repo docs.
+- R2 lifecycle rule `delete-images-after-1-day` is enabled for prefix `images/`.
+- The service should treat R2 secret values as environment variables only and never log them.
+- Existing generated-image R2 object keys are produced by `buildImageKey(config.r2.keyPrefix, new Date(), undefined, extension)`, which uses UTC `YYYY/MM/DD` folders.
+- The current admin UI already imports `UploadCloud`, `Copy`, `LinkIcon`, and loading icons, so an upload panel can match the existing dashboard controls without adding UI dependencies.
+- The original service was a synchronous Fastify wrapper. Async task facts now live in PostgreSQL and do not rely on the SQLite admin store.
+- `package.json` now includes `pg`, `bullmq`, and `ioredis` for PostgreSQL task facts and Redis/BullMQ flow control.
+- new-api alignment feedback: `secret_id` must map to a real callback secret; callback headers should use generic `X-Callback-Secret-Id`; batch callback events should include `client_task_id`; each callback batch must contain only one `secret_id`; new-api will not expose `provider_task_id` to its final users.
+- provider_direct_lease alignment: new-api owns channel selection and credentials; image-handle stores only `lease_id/resolve_url/secret_id`, resolves short-lived credentials at execution time, strips raw base64 fields from callback `raw_response`, and returns only R2 URLs.
+- 2026-07-14 image-pricing contract audit started with existing working-tree changes in `src/async/worker.ts`, `test/async.test.ts`, and `test/server.test.ts`; these changes are in scope and must be preserved while verifying all four image parameters and lease model override.
+- Async execution builds the upstream body as `{...task.parameters, model: lease.model || task.model, prompt: task.input.text}`. This preserves `quality`/`size`/`resolution`/`n` and guarantees a non-empty lease model overrides the public task model for both generation JSON and edit multipart.
+- The async patch adds `resolution` to the worker request audit and returned-output audit. Initial review also found synchronous request-audit allowlists omitted `resolution`.
+- Synchronous forwarding itself was already correct: JSON defaults are applied to a spread copy of the original request and the whole object is serialized; multipart iterates and appends every incoming scalar field. The synchronous omission was limited to admin `request_params` audit data.
+- Added `resolution` to both synchronous server and shared runner request-audit allowlists; the admin request record test now proves `quality`, `size`, `resolution`, and `n` are retained without storing prompt or authorization data.
+- The contract matrix is covered: synchronous generation JSON, synchronous edit JSON/multipart, async request persistence, async generation JSON, async edit multipart, and lease model override from public `adobe-gpt-image-2-count` to upstream `gpt-image-2`.
+- `image-handle` remains pricing-agnostic and contains no image price table or public-to-upstream model mapping. The upstream model is supplied exclusively by the resolved credential lease.
+- Verification on 2026-07-14 passed: `npm test` reported 61/61 tests, `npm run build` completed Vite admin and TypeScript server builds, and `git diff --check` was clean. Vite emitted only its existing large-chunk advisory for the admin bundle.
+- URL output passthrough is implemented in the legacy synchronous server and shared async runner. URL sources perform no GET or R2 upload; base64 sources keep the existing validated R2 path; mixed output metadata remains index-aligned.
+- Signed URLs are returned from the JSON-parsed value. Only residual literal `\\u0026` separators are normalized; `%2F`, `%26`, plus signs, query order, and SigV4 values stay intact. Debug logs retain host/path and redact the complete query.
+- Live task `task_codex_url_token_1784007474` sent `response_format=url` to mapped `gpt-image-2`, received Adobe HTTP 200, and stored one original Firefly URL with no local format/byte metadata. The result/raw/task URLs matched and a one-byte Range GET returned `206 image/png`.
+- Live count task `task_codex_url_count_1784008131` independently passed the same contract on channel #90 after new-api supplied the configured default `quality=low`; its URL also returned `206 image/png` and no R2/local metadata was introduced.
+- The live worker debug log contains resolve/request/response/response-body stages with authorization and signed query values redacted; callback delivery succeeded once.
+- Final verification passed `npm test` 66/66 and `git diff --check`.
+- 2026-07-17 Webhook simplification affects no image-handle production path. Only the local third-party receiver fixture changes from timestamped HMAC verification to a user-supplied Bearer key.
