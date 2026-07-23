@@ -17,6 +17,7 @@ import {
   LogOut,
   MemoryStick,
   RefreshCw,
+  Search,
   Send,
   Server,
   Cpu,
@@ -214,6 +215,7 @@ interface AsyncTaskRecord {
   created_at: string;
   started_at?: string;
   finished_at?: string;
+  duration_ms?: number;
   updated_at: string;
 }
 
@@ -391,6 +393,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
   const [imagePageSize, setImagePageSize] = useState(10);
   const [asyncTaskPage, setAsyncTaskPage] = useState(1);
   const [asyncTaskPageSize, setAsyncTaskPageSize] = useState(10);
+  const [asyncTaskTraceId, setAsyncTaskTraceId] = useState('');
   const [callbackPage, setCallbackPage] = useState(1);
   const [callbackPageSize, setCallbackPageSize] = useState(10);
   const [errorPage, setErrorPage] = useState(1);
@@ -406,6 +409,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
     imagePageSize?: number;
     asyncTaskPage?: number;
     asyncTaskPageSize?: number;
+    asyncTaskTraceId?: string;
     callbackPage?: number;
     callbackPageSize?: number;
     errorPage?: number;
@@ -423,13 +427,21 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
       const nextImagePageSize = options.imagePageSize ?? imagePageSize;
       const nextAsyncTaskPage = options.asyncTaskPage ?? asyncTaskPage;
       const nextAsyncTaskPageSize = options.asyncTaskPageSize ?? asyncTaskPageSize;
+      const nextAsyncTaskTraceId = options.asyncTaskTraceId ?? asyncTaskTraceId;
       const nextCallbackPage = options.callbackPage ?? callbackPage;
       const nextCallbackPageSize = options.callbackPageSize ?? callbackPageSize;
       const nextErrorPage = options.errorPage ?? errorPage;
+      const asyncTaskQuery = new URLSearchParams({
+        page: String(nextAsyncTaskPage),
+        page_size: String(nextAsyncTaskPageSize)
+      });
+      if (nextAsyncTaskTraceId) {
+        asyncTaskQuery.set('trace_id', nextAsyncTaskTraceId);
+      }
       const [summary, asyncOverview, asyncTasks, callbacks, requests, images, errors] = await Promise.all([
         fetchJson<{ runtime: RuntimeStats; summary: Summary }>(adminPath('/api/summary')),
         fetchJson<AsyncOverview>(adminPath('/api/async/summary')),
-        fetchJson<PaginatedAsyncTasks>(adminPath(`/api/async/tasks?page=${nextAsyncTaskPage}&page_size=${nextAsyncTaskPageSize}`)),
+        fetchJson<PaginatedAsyncTasks>(adminPath(`/api/async/tasks?${asyncTaskQuery.toString()}`)),
         fetchJson<PaginatedCallbacks>(adminPath(`/api/async/callbacks?page=${nextCallbackPage}&page_size=${nextCallbackPageSize}`)),
         fetchJson<PaginatedRecords>(adminPath(`/api/requests?page=${nextRequestPage}&page_size=${nextRequestPageSize}`)),
         fetchJson<PaginatedRecords>(adminPath(`/api/images?page=${nextImagePage}&page_size=${nextImagePageSize}`)),
@@ -480,6 +492,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
     imagePageSize,
     asyncTaskPage,
     asyncTaskPageSize,
+    asyncTaskTraceId,
     callbackPage,
     callbackPageSize,
     errorPage
@@ -544,6 +557,13 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
     setAsyncTaskPage(1);
     setAsyncTaskPageSize(pageSize);
     void load({ silent: true, asyncTaskPage: 1, asyncTaskPageSize: pageSize });
+  }
+
+  function searchAsyncTasks(traceId: string) {
+    const normalizedTraceId = traceId.trim();
+    setAsyncTaskTraceId(normalizedTraceId);
+    setAsyncTaskPage(1);
+    void load({ silent: true, asyncTaskPage: 1, asyncTaskTraceId: normalizedTraceId });
   }
 
   function changeCallbackPage(page: number) {
@@ -713,7 +733,14 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
           ) : (
             <>
               <AsyncOverviewPanel overview={data.async} />
-              <AsyncTaskTable page={data.asyncTasks} enabled={data.async.enabled} onPageChange={changeAsyncTaskPage} onPageSizeChange={changeAsyncTaskPageSize} />
+              <AsyncTaskTable
+                page={data.asyncTasks}
+                enabled={data.async.enabled}
+                traceId={asyncTaskTraceId}
+                onTraceSearch={searchAsyncTasks}
+                onPageChange={changeAsyncTaskPage}
+                onPageSizeChange={changeAsyncTaskPageSize}
+              />
               <CallbackTable page={data.callbacks} enabled={data.async.enabled} onPageChange={changeCallbackPage} onPageSizeChange={changeCallbackPageSize} />
             </>
           )}
@@ -1169,19 +1196,61 @@ function ErrorPanel({ errors, onPageChange }: {
   );
 }
 
-function AsyncTaskTable({ page, enabled, onPageChange, onPageSizeChange }: {
+function AsyncTaskTable({ page, enabled, traceId, onTraceSearch, onPageChange, onPageSizeChange }: {
   page: PaginatedAsyncTasks;
   enabled: boolean;
+  traceId: string;
+  onTraceSearch: (traceId: string) => void;
   onPageChange: (page: number) => void;
   onPageSizeChange: (pageSize: number) => void;
 }) {
+  const [traceInput, setTraceInput] = useState(traceId);
+
+  useEffect(() => {
+    setTraceInput(traceId);
+  }, [traceId]);
+
   return (
     <section className="panel table-panel">
-      <div className="panel-heading">
+      <div className="panel-heading async-task-heading">
         <div>
           <h2>图片任务</h2>
           <p>展示提交方式、direct lease 执行状态、R2 结果和安全版上游响应状态，不展示 prompt 和密钥。</p>
         </div>
+        <form
+          className="task-trace-search"
+          onSubmit={(event) => {
+            event.preventDefault();
+            onTraceSearch(traceInput);
+          }}
+        >
+          <label htmlFor="task-trace-id">链路 ID</label>
+          <input
+            id="task-trace-id"
+            value={traceInput}
+            onChange={(event) => setTraceInput(event.target.value)}
+            placeholder="Request ID / new-api 任务 ID / image-handle 任务 ID"
+            spellCheck={false}
+          />
+          <button type="submit" className="primary-button">
+            <Search size={16} />
+            搜索
+          </button>
+          {traceInput || traceId ? (
+            <button
+              type="button"
+              className="icon-button"
+              onClick={() => {
+                setTraceInput('');
+                onTraceSearch('');
+              }}
+              title="清除链路 ID"
+              aria-label="清除链路 ID"
+            >
+              <X size={16} />
+            </button>
+          ) : null}
+        </form>
       </div>
       <div className="table-scroll">
         <table className="async-task-table">
@@ -1189,6 +1258,7 @@ function AsyncTaskTable({ page, enabled, onPageChange, onPageSizeChange }: {
             <tr>
               <th>创建时间</th>
               <th>状态</th>
+              <th>Request ID</th>
               <th>new-api 任务</th>
               <th>内部任务</th>
               <th>提交方式</th>
@@ -1201,6 +1271,7 @@ function AsyncTaskTable({ page, enabled, onPageChange, onPageSizeChange }: {
               <th>尝试</th>
               <th>图片</th>
               <th>错误</th>
+              <th>耗时</th>
               <th>更新时间</th>
               <th>URL</th>
             </tr>
@@ -1208,32 +1279,42 @@ function AsyncTaskTable({ page, enabled, onPageChange, onPageSizeChange }: {
           <tbody>
             {!enabled ? (
               <tr>
-                <td colSpan={16} className="table-empty">任务队列管理未启用</td>
+                <td colSpan={18} className="table-empty">任务队列管理未启用</td>
               </tr>
             ) : page.data.length === 0 ? (
               <tr>
-                <td colSpan={16} className="table-empty">暂无图片任务</td>
+                <td colSpan={18} className="table-empty">暂无图片任务</td>
               </tr>
             ) : page.data.map((task) => (
               <tr key={task.provider_task_id}>
                 <td>{formatDate(task.created_at)}</td>
                 <td><AsyncStatusPill status={task.status} /></td>
-                <td className="id-cell">{task.client_task_id}</td>
-                <td className="id-cell">{task.provider_task_id}</td>
+                <TraceIdCell value={task.request_id} />
+                <TraceIdCell value={task.client_task_id} />
+                <TraceIdCell value={task.provider_task_id} />
                 <td>{formatSubmissionMode(task)}</td>
-                <td>{formatExecutorLabel(task)} / {task.model}</td>
-                <td className="id-cell">{formatLeaseId(task)}</td>
+                <td>
+                  <span className="single-line" title={`${formatExecutorLabel(task)} / ${task.model}`}>
+                    {formatExecutorLabel(task)} / {task.model}
+                  </span>
+                </td>
+                <TraceIdCell value={formatLeaseId(task)} />
                 <td>{formatChannelId(task)}</td>
                 <td>{asyncOperationLabel(task.operation)}</td>
                 <td className="params-cell">
-                  <span className="single-line">{formatAsyncTaskParams(task)}</span>
+                  <span className="single-line" title={formatAsyncTaskParams(task)}>{formatAsyncTaskParams(task)}</span>
                 </td>
                 <td className="params-cell">
-                  <span className="single-line">{formatAsyncTaskUsage(task)}</span>
+                  <span className="single-line" title={formatAsyncTaskUsage(task)}>{formatAsyncTaskUsage(task)}</span>
                 </td>
                 <td>{task.attempts}</td>
                 <td>{task.image_count}</td>
-                <td className="error-message-cell">{task.error_code ? formatTaskError(task) : '-'}</td>
+                <td className="error-message-cell">
+                  <span className="single-line" title={task.error_code ? formatTaskError(task) : undefined}>
+                    {task.error_code ? formatTaskError(task) : '-'}
+                  </span>
+                </td>
+                <td>{task.duration_ms === undefined ? '-' : formatMs(task.duration_ms)}</td>
                 <td>{formatDate(task.updated_at)}</td>
                 <td>
                   {task.first_image_url ? (
@@ -1254,6 +1335,14 @@ function AsyncTaskTable({ page, enabled, onPageChange, onPageSizeChange }: {
       </div>
       <Pagination page={page} onPageChange={onPageChange} onPageSizeChange={onPageSizeChange} />
     </section>
+  );
+}
+
+function TraceIdCell({ value }: { value: string }) {
+  return (
+    <td className="id-cell">
+      <span className="single-line" title={value === '-' ? undefined : value}>{value}</span>
+    </td>
   );
 }
 
@@ -1765,8 +1854,7 @@ function formatTaskError(task: AsyncTaskRecord): string {
   if (!message) {
     return code;
   }
-  const brief = message.length > 48 ? `${message.slice(0, 47)}...` : message;
-  return `${code} · ${brief}`;
+  return `${code} · ${message}`;
 }
 
 function formatSubmissionMode(task: AsyncTaskRecord): string {

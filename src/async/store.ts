@@ -98,6 +98,7 @@ export interface AdminAsyncTaskRecord {
   created_at: string;
   started_at?: string;
   finished_at?: string;
+  duration_ms?: number;
   updated_at: string;
 }
 
@@ -185,6 +186,9 @@ export class AsyncTaskStore {
 
         CREATE INDEX IF NOT EXISTS idx_image_tasks_client_task_id
           ON image_tasks(client_task_id);
+
+        CREATE INDEX IF NOT EXISTS idx_image_tasks_request_id
+          ON image_tasks(request_id);
 
         CREATE TABLE IF NOT EXISTS callback_events (
           event_id TEXT PRIMARY KEY,
@@ -444,23 +448,36 @@ export class AsyncTaskStore {
     return summary;
   }
 
-  async getAdminTasksPage(page: number, pageSize: number): Promise<AdminPage<AdminAsyncTaskRecord>> {
+  async getAdminTasksPage(page: number, pageSize: number, traceId?: string): Promise<AdminPage<AdminAsyncTaskRecord>> {
     const safePage = Math.max(1, Math.floor(page));
     const safePageSize = Math.min(100, Math.max(1, Math.floor(pageSize)));
-    const totalRow = await this.pool.query<{ total: string }>('SELECT COUNT(*)::text AS total FROM image_tasks');
+    const normalizedTraceId = traceId?.trim() ?? '';
+    const filterValues = normalizedTraceId ? [normalizedTraceId] : [];
+    const whereClause = normalizedTraceId
+      ? 'WHERE request_id = $1 OR client_task_id = $1 OR provider_task_id = $1'
+      : '';
+    const totalRow = await this.pool.query<{ total: string }>(`
+      SELECT COUNT(*)::text AS total
+      FROM image_tasks
+      ${whereClause}
+    `, filterValues);
     const total = Number.parseInt(totalRow.rows[0]?.total ?? '0', 10);
     const totalPages = Math.max(1, Math.ceil(total / safePageSize));
     const currentPage = Math.min(safePage, totalPages);
     const offset = (currentPage - 1) * safePageSize;
+    const limitParameter = filterValues.length + 1;
+    const offsetParameter = filterValues.length + 2;
     const result = await this.pool.query<TaskRow>(`
       SELECT *
       FROM image_tasks
+      ${whereClause}
       ORDER BY created_at DESC
-      LIMIT $1 OFFSET $2
-    `, [safePageSize, offset]);
+      LIMIT $${limitParameter} OFFSET $${offsetParameter}
+    `, [...filterValues, safePageSize, offset]);
+    const nowMs = Date.now();
 
     return {
-      data: result.rows.map(mapAdminTaskRow),
+      data: result.rows.map((row) => mapAdminTaskRow(row, nowMs)),
       page: currentPage,
       pageSize: safePageSize,
       total,
@@ -687,7 +704,7 @@ function mapTaskRow(row: TaskRow): AsyncTaskRecord {
   };
 }
 
-function mapAdminTaskRow(row: TaskRow): AdminAsyncTaskRecord {
+function mapAdminTaskRow(row: TaskRow, nowMs = Date.now()): AdminAsyncTaskRecord {
   const result = safeObject(row.result_json);
   const error = row.error_json ? safeObject(row.error_json) as unknown as AsyncTaskError : null;
   const rawResponseOmittedFields = Array.isArray(result.raw_response_omitted_fields)
@@ -722,8 +739,16 @@ function mapAdminTaskRow(row: TaskRow): AdminAsyncTaskRecord {
     created_at: row.created_at.toISOString(),
     started_at: dateToIso(row.started_at),
     finished_at: dateToIso(row.finished_at),
+    duration_ms: taskDurationMs(row.started_at, row.finished_at, nowMs),
     updated_at: row.updated_at.toISOString()
   };
+}
+
+function taskDurationMs(startedAt: Date | null, finishedAt: Date | null, nowMs: number): number | undefined {
+  if (!startedAt) {
+    return undefined;
+  }
+  return Math.max(0, (finishedAt?.getTime() ?? nowMs) - startedAt.getTime());
 }
 
 function mapCallbackRow(row: CallbackRow): CallbackEventRecord {

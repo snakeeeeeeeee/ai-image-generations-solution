@@ -5,7 +5,7 @@ import Fastify from 'fastify';
 import { AdminStore } from '../src/admin/store.js';
 import { buildServer } from '../src/server.js';
 import type { AppConfig } from '../src/config.js';
-import type { AsyncTaskStore } from '../src/async/store.js';
+import { AsyncTaskStore } from '../src/async/store.js';
 import type { QueueClients } from '../src/async/queue.js';
 
 const tinyPngBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=';
@@ -267,7 +267,7 @@ test('admin async APIs report disabled empty state without async infra', async (
 
   const tasks = await app.inject({
     method: 'GET',
-    url: '/image-wrapper/admin/api/async/tasks?page=1&page_size=10',
+    url: '/image-wrapper/admin/api/async/tasks?page=1&page_size=10&trace_id=req_missing',
     headers: {
       cookie
     }
@@ -291,8 +291,57 @@ test('admin async APIs report disabled empty state without async infra', async (
   await upstream.close();
 });
 
+test('admin task store filters exact trace IDs and derives completed duration', async () => {
+  const store = new AsyncTaskStore('postgresql://unused');
+  const calls: Array<{ sql: string; values: unknown[] }> = [];
+  Object.defineProperty(store.pool, 'query', {
+    value: async (sql: string, values: unknown[] = []) => {
+      calls.push({ sql, values });
+      if (sql.includes('COUNT(*)')) {
+        return { rows: [{ total: '1' }] };
+      }
+      return {
+        rows: [{
+          provider_task_id: 'imgtask_trace',
+          client_task_id: 'task_trace',
+          request_id: 'req_trace',
+          request_fingerprint: 'fingerprint',
+          provider_api_key_hash: 'hash',
+          provider: 'provider_direct_lease',
+          model: 'gpt-image-2',
+          operation: 'generation',
+          status: 'succeeded',
+          input_json: {},
+          parameters_json: {},
+          provider_options_json: {},
+          executor_json: {},
+          callback_json: {},
+          metadata_json: {},
+          result_json: { images: [] },
+          usage_json: null,
+          error_json: null,
+          attempts: 1,
+          created_at: new Date('2026-06-22T01:00:00.000Z'),
+          started_at: new Date('2026-06-22T01:00:01.000Z'),
+          finished_at: new Date('2026-06-22T01:00:10.000Z'),
+          updated_at: new Date('2026-06-22T01:00:10.000Z')
+        }]
+      };
+    }
+  });
+
+  const page = await store.getAdminTasksPage(1, 10, ' req_trace ');
+
+  assert.equal(page.data[0]?.duration_ms, 9000);
+  assert.match(calls[0]?.sql ?? '', /request_id = \$1 OR client_task_id = \$1 OR provider_task_id = \$1/);
+  assert.deepEqual(calls[0]?.values, ['req_trace']);
+  assert.deepEqual(calls[1]?.values, ['req_trace', 10, 0]);
+  await store.close();
+});
+
 test('admin async APIs expose task callback and queue status', async () => {
   const upstream = await buildUpstream();
+  let requestedTraceId: string | undefined;
   const fakeAsyncStore = {
     getAdminTaskSummary: async () => ({
       total: 2,
@@ -313,48 +362,52 @@ test('admin async APIs expose task callback and queue status', async () => {
       lastCreatedAt: '2026-06-22T01:02:00.000Z',
       lastUpdatedAt: '2026-06-22T01:02:00.000Z'
     }),
-    getAdminTasksPage: async (page: number, pageSize: number) => ({
-      data: [
-        {
-          provider_task_id: 'imgtask_1',
-          client_task_id: 'task_1',
-          request_id: 'req_1',
-          provider: 'provider_direct_lease',
-          model: 'gpt-image-2',
-          operation: 'generation',
-          status: 'succeeded',
-          parameters: {
-            size: '1024x1024',
-            output_format: 'png'
-          },
-          executor: {
-            type: 'provider_direct_lease',
-            lease_id: 'lease_1',
-            resolve_url: 'http://newapi-master:3000/api/internal/image/credential-leases/lease_1/resolve',
-            secret_id: 'image_handle_1'
-          },
-          metadata: {
-            channel_id: 'channel_123'
-          },
-          usage: {
-            total_tokens: 12
-          },
-          raw_response_truncated: true,
-          raw_response_omitted_fields: ['data[].b64_json'],
-          attempts: 1,
-          image_count: 1,
-          first_image_url: 'https://img.example.com/images/test.png',
-          created_at: '2026-06-22T01:00:00.000Z',
-          started_at: '2026-06-22T01:00:01.000Z',
-          finished_at: '2026-06-22T01:00:10.000Z',
-          updated_at: '2026-06-22T01:00:10.000Z'
-        }
-      ],
-      page,
-      pageSize,
-      total: 1,
-      totalPages: 1
-    }),
+    getAdminTasksPage: async (page: number, pageSize: number, traceId?: string) => {
+      requestedTraceId = traceId;
+      return {
+        data: [
+          {
+            provider_task_id: 'imgtask_1',
+            client_task_id: 'task_1',
+            request_id: 'req_1',
+            provider: 'provider_direct_lease',
+            model: 'gpt-image-2',
+            operation: 'generation',
+            status: 'succeeded',
+            parameters: {
+              size: '1024x1024',
+              output_format: 'png'
+            },
+            executor: {
+              type: 'provider_direct_lease',
+              lease_id: 'lease_1',
+              resolve_url: 'http://newapi-master:3000/api/internal/image/credential-leases/lease_1/resolve',
+              secret_id: 'image_handle_1'
+            },
+            metadata: {
+              channel_id: 'channel_123'
+            },
+            usage: {
+              total_tokens: 12
+            },
+            raw_response_truncated: true,
+            raw_response_omitted_fields: ['data[].b64_json'],
+            attempts: 1,
+            image_count: 1,
+            first_image_url: 'https://img.example.com/images/test.png',
+            created_at: '2026-06-22T01:00:00.000Z',
+            started_at: '2026-06-22T01:00:01.000Z',
+            finished_at: '2026-06-22T01:00:10.000Z',
+            duration_ms: 9000,
+            updated_at: '2026-06-22T01:00:10.000Z'
+          }
+        ],
+        page,
+        pageSize,
+        total: 1,
+        totalPages: 1
+      };
+    },
     getAdminCallbackEventsPage: async (page: number, pageSize: number) => ({
       data: [
         {
@@ -465,6 +518,17 @@ test('admin async APIs expose task callback and queue status', async () => {
   assert.equal(tasks.statusCode, 200);
   assert.equal(tasks.json().data[0].client_task_id, 'task_1');
   assert.equal(tasks.json().data[0].first_image_url, 'https://img.example.com/images/test.png');
+  assert.equal(tasks.json().data[0].duration_ms, 9000);
+
+  const filteredTasks = await app.inject({
+    method: 'GET',
+    url: '/image-wrapper/admin/api/async/tasks?page=1&page_size=10&trace_id=req_1',
+    headers: {
+      cookie
+    }
+  });
+  assert.equal(filteredTasks.statusCode, 200);
+  assert.equal(requestedTraceId, 'req_1');
 
   const callbacks = await app.inject({
     method: 'GET',

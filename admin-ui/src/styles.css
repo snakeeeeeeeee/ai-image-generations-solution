@@ -487,6 +487,40 @@ h2 {
   margin-bottom: 14px;
 }
 
+.async-task-heading {
+  align-items: end;
+}
+
+.task-trace-search {
+  flex: 0 1 680px;
+  display: grid;
+  grid-template-columns: auto minmax(260px, 1fr) auto auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.task-trace-search label {
+  color: var(--text-muted);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.task-trace-search input {
+  min-width: 0;
+  min-height: 42px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  padding: 0 12px;
+  color: var(--text);
+  background: var(--surface-solid);
+  outline: none;
+}
+
+.task-trace-search input:focus {
+  border-color: #2563eb;
+  box-shadow: 0 0 0 3px var(--focus);
+}
+
 .chart-wrap {
   width: 100%;
   min-height: 260px;
@@ -874,7 +908,76 @@ table {
 }
 
 .async-task-table {
-  min-width: 1320px;
+  width: 2900px;
+  min-width: 2900px;
+  table-layout: fixed;
+}
+
+.async-task-table th:nth-child(1),
+.async-task-table th:nth-child(17) {
+  width: 170px;
+}
+
+.async-task-table th:nth-child(2) {
+  width: 110px;
+}
+
+.async-task-table th:nth-child(3),
+.async-task-table th:nth-child(4),
+.async-task-table th:nth-child(5) {
+  width: 210px;
+}
+
+.async-task-table th:nth-child(6) {
+  width: 100px;
+}
+
+.async-task-table th:nth-child(7) {
+  width: 230px;
+}
+
+.async-task-table th:nth-child(8) {
+  width: 210px;
+}
+
+.async-task-table th:nth-child(9),
+.async-task-table th:nth-child(10) {
+  width: 80px;
+}
+
+.async-task-table th:nth-child(11) {
+  width: 280px;
+}
+
+.async-task-table th:nth-child(12) {
+  width: 220px;
+}
+
+.async-task-table th:nth-child(13),
+.async-task-table th:nth-child(14) {
+  width: 60px;
+}
+
+.async-task-table th:nth-child(15) {
+  width: 320px;
+}
+
+.async-task-table th:nth-child(16),
+.async-task-table th:nth-child(18) {
+  width: 90px;
+}
+
+.async-task-table td {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.async-task-table .params-cell,
+.async-task-table .error-message-cell,
+.async-task-table .id-cell {
+  width: auto;
+  min-width: 0;
+  max-width: none;
 }
 
 .callback-table {
@@ -1272,6 +1375,21 @@ th {
 
   .upload-url .table-actions {
     justify-content: flex-end;
+  }
+
+  .async-task-heading {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .task-trace-search {
+    width: 100%;
+    flex: none;
+    grid-template-columns: 1fr auto auto;
+  }
+
+  .task-trace-search label {
+    grid-column: 1 / -1;
   }
 
   .pagination {

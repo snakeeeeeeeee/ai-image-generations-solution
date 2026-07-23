@@ -33,6 +33,10 @@ interface PageQuery {
   page_size?: string;
 }
 
+interface AsyncTaskPageQuery extends PageQuery {
+  trace_id?: string;
+}
+
 interface DrainBody {
   draining?: boolean;
   reason?: string;
@@ -233,7 +237,7 @@ export function registerAdminRoutes(app: FastifyInstance, options: AdminRoutesOp
     };
   });
 
-  app.get<{ Querystring: PageQuery }>(route('/api/async/tasks'), {
+  app.get<{ Querystring: AsyncTaskPageQuery }>(route('/api/async/tasks'), {
     preHandler: async (request, reply) => requireAdmin(options.config, request, reply)
   }, async (request, reply) => {
     if (!options.asyncTaskStore) {
@@ -242,7 +246,8 @@ export function registerAdminRoutes(app: FastifyInstance, options: AdminRoutesOp
 
     const page = parseBoundedInt(request.query.page, 1, 1, Number.MAX_SAFE_INTEGER);
     const pageSize = parseBoundedInt(request.query.page_size, 20, 1, 100);
-    return options.asyncTaskStore.getAdminTasksPage(page, pageSize);
+    const traceId = request.query.trace_id?.trim() || undefined;
+    return options.asyncTaskStore.getAdminTasksPage(page, pageSize, traceId);
   });
 
   app.get<{ Querystring: PageQuery }>(route('/api/async/callbacks'), {
