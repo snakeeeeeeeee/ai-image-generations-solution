@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import { randomBytes } from 'node:crypto';
+import { isIP } from 'node:net';
 import type { AdminConfig } from './admin/types.js';
 
 const DEFAULT_BODY_LIMIT_BYTES = 100 * 1024 * 1024;
@@ -58,6 +59,8 @@ export interface AsyncTaskConfig {
   postgresUrl: string;
   redisUrl: string;
   providerApiKeys: string[];
+  workerNodeId?: string;
+  workerAdvertisedIp?: string;
   workerConcurrency: number;
   imageProcessingConcurrency: number;
   globalRateLimitIpm: number;
@@ -142,6 +145,30 @@ function normalizeOutputFormat(value: string): ImageOutputFormat {
   throw new Error(`DEFAULT_OUTPUT_FORMAT must be png, jpeg, or webp; received: ${value}`);
 }
 
+function normalizeWorkerNodeId(value: string): string | undefined {
+  const normalized = value.trim();
+  if (normalized === '') {
+    return undefined;
+  }
+  if (normalized.length > 64 || !/^[a-z0-9._-]+$/.test(normalized)) {
+    throw new Error(
+      `WORKER_NODE_ID must be 1-64 characters using lowercase letters, numbers, dots, underscores, or hyphens; received: ${value}`
+    );
+  }
+  return normalized;
+}
+
+function normalizeAdvertisedIp(value: string): string | undefined {
+  const normalized = value.trim();
+  if (normalized === '') {
+    return undefined;
+  }
+  if (isIP(normalized) === 0) {
+    throw new Error(`WORKER_ADVERTISED_IP must be a valid IPv4 or IPv6 address; received: ${value}`);
+  }
+  return normalized;
+}
+
 function parseCsvEnv(name: string, fallback: string): string[] {
   return optionalEnv(name, fallback)
     .split(',')
@@ -199,7 +226,7 @@ function parseStringMapEnv(name: string, fallback: string): Record<string, strin
 }
 
 export function loadConfig(): AppConfig {
-  return {
+  const config: AppConfig = {
     port: parsePositiveInt('PORT', 8787),
     host: optionalEnv('HOST', '0.0.0.0'),
     logLevel: optionalEnv('LOG_LEVEL', 'info'),
@@ -253,6 +280,8 @@ export function loadConfig(): AppConfig {
       postgresUrl: optionalEnv('POSTGRES_URL', ''),
       redisUrl: optionalEnv('REDIS_URL', ''),
       providerApiKeys: parseCsvEnv('PROVIDER_API_KEYS', ''),
+      workerNodeId: normalizeWorkerNodeId(optionalEnv('WORKER_NODE_ID', '')),
+      workerAdvertisedIp: normalizeAdvertisedIp(optionalEnv('WORKER_ADVERTISED_IP', '')),
       workerConcurrency: parsePositiveInt('WORKER_CONCURRENCY', 20),
       imageProcessingConcurrency: parsePositiveInt('IMAGE_PROCESSING_CONCURRENCY', 10),
       globalRateLimitIpm: parsePositiveInt('GLOBAL_RATE_LIMIT_IPM', 250),
@@ -274,4 +303,15 @@ export function loadConfig(): AppConfig {
       taskStaleProcessingTimeoutSeconds: parsePositiveInt('TASK_STALE_PROCESSING_TIMEOUT_SECONDS', 1800)
     }
   };
+
+  if (config.role === 'worker' || config.role === 'all') {
+    if (!config.asyncTasks.workerNodeId) {
+      throw new Error('WORKER_NODE_ID is required for worker and all roles');
+    }
+    if (!config.asyncTasks.workerAdvertisedIp) {
+      throw new Error('WORKER_ADVERTISED_IP is required for worker and all roles');
+    }
+  }
+
+  return config;
 }

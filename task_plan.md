@@ -45,6 +45,48 @@ Completed scope: a horizontally scalable async image task execution mode for new
 - [complete] Preserve configurable failure/success responses and event capture for retry E2E.
 - [complete] Run the full image-handle test/build and shared-network new-api integration.
 
+## Phase 13: Node-aware worker scheduling and observability
+
+- [complete] Add stable worker node identity and advertised IP validation to configuration and Redis heartbeats.
+- [complete] Add PostgreSQL task assignment/version fields, scheduler state, assignment-safe mutations, and indexes.
+- [complete] Replace the shared worker queue with per-node queues and an API-owned advisory-lock scheduler.
+- [complete] Add offline-node reassignment, stale-processing recovery, and node-local queued-task recovery.
+- [complete] Aggregate node queues and worker instances in the admin API; show node ID, advertised IP, runtime details, and assigned task node in the UI.
+- [complete] Update deployment examples and operator documentation for the two required per-node variables.
+- [complete] Add scheduling, concurrency, stale-assignment, recovery, migration, and UI coverage.
+- [complete] Run the full test/build suite, diff checks, Docker Compose validation, and desktop/mobile browser QA.
+
+### Phase 13 decisions
+
+**Status:** complete
+
+- Each physical node uses one stable `WORKER_NODE_ID`; multiple worker processes on that node share `image-tasks-<WORKER_NODE_ID>`.
+- The API writes tasks as `submitted`, then assigns them under a PostgreSQL advisory transaction lock using live Redis node heartbeats.
+- Node load is `(queued + processing) / sum(min(worker concurrency, image-processing concurrency))`.
+- Equal-load nodes are ordered by persistent `last_assignment_seq`, then node ID for deterministic rotation.
+- `assigned_node_id` is admin-only metadata; external task responses and callback payloads remain unchanged.
+- Queued assignments can move immediately when a node is offline; processing assignments move only after the existing stale timeout.
+- Rollout assumes the legacy shared queue is drained during a short submission pause; no dual-queue compatibility path is added.
+
+## Phase 14: Admin operations console redesign
+
+- [complete] Replace the two-tab page shell with adaptive operations navigation and a compact top bar.
+- [complete] Separate overview, synchronous interface, asynchronous tasks, image records, and system tools into focused views.
+- [complete] Rework worker nodes into compact operational rows with collapsed instance diagnostics.
+- [complete] Limit each node preview to three current tasks and show the remaining active count.
+- [complete] Refine tables, metrics, spacing, contrast, focus states, and responsive behavior.
+- [complete] Run the full test/build suite and populated desktop/mobile browser QA.
+
+### Phase 14 decisions
+
+**Status:** complete
+
+- Preserve synchronous and asynchronous operation as separate primary destinations.
+- Keep the admin API and all public protocols unchanged; this phase is a frontend information-architecture refactor.
+- Show no more than three current tasks per node while retaining the exact aggregate active task count.
+- Move drain mode and manual R2 upload into a dedicated system-tools view.
+- Use a desktop navigation rail and a compact top navigation grid on narrow screens.
+
 ## Errors Encountered
 
 | Error | Attempt | Resolution |
@@ -60,3 +102,12 @@ Completed scope: a horizontally scalable async image task execution mode for new
 | Docker diagnostic queried nonexistent `async_tasks` instead of the actual `image_tasks` table | 1 | List PostgreSQL tables and query the real image task table on the next check. |
 | Pinned-download reproduction imported `/app/dist/safe-url.js`, but compiled sources live under a different dist path | 1 | Inspect the runtime dist tree and rerun against the actual module path. |
 | First pinned-fetch regression returned `ECONNREFUSED ::1` because the fixture server listened only on IPv4 while one pinned DNS address was returned | 1 | Return the complete already-validated DNS result for Undici `all:true` lookups, preserving pinning while enabling IPv4/IPv6 fallback. |
+| Phase 13 first TypeScript check found node aggregate fields on the per-instance heartbeat interface and old test route fixtures | 1 | Move aggregate-only fields to `WorkerNodeHeartbeat`, then update task fixtures and route scheduler stubs before rerunning. |
+| Phase 14 findings update targeted a heading not present in the flat findings file | 1 | Located the existing Phase 14 bullets and inserted the design-system decisions beside them. |
+| Browser binding did not expose `browser.documentation.get(...)` | 1 | Read the packaged CDP capability guide directly and continue with `tab.capabilities.get("cdp")`. |
+| Browser safety layer rejected an untyped `Fetch.enable` pattern | 1 | Narrow the local mock interception to explicit `Fetch` and `XHR` resource types so document navigation is never intercepted. |
+| Browser mock retry referenced a cursor that the rejected setup never initialized | 1 | Declare the event cursor, navigation promise, and handled count inside the narrowed retry call. |
+| Browser mock loop timed out waiting for eight requests | 1 | The target differed only by hash and did not reload the app. Reconnect after the automatic kernel reset and navigate with a unique query string to force a full load. |
+| Reconnected CDP interception received an invalid stale interception id | 1 | Stop the unstable interception approach after three distinct failures. Serve the built admin UI and fixture endpoints from a disposable local read-only preview server instead. |
+| Browser `getByLabel("自动刷新")` did not resolve the visible select | 1 | Take a fresh DOM snapshot and use the stable unique `.refresh-select select` selector from the rendered markup. |
+| Planning completion script reported zero completed phases | 1 | The long-lived plan used checklist statuses instead of the script's marker. Added explicit completion markers to the two level-three phase-decision sections it detects. |

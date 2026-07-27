@@ -393,6 +393,8 @@ test('admin async APIs expose task callback and queue status', async () => {
             raw_response_truncated: true,
             raw_response_omitted_fields: ['data[].b64_json'],
             attempts: 1,
+            assigned_node_id: 'main',
+            assignment_version: 1,
             image_count: 1,
             first_image_url: 'https://img.example.com/images/test.png',
             created_at: '2026-06-22T01:00:00.000Z',
@@ -428,7 +430,8 @@ test('admin async APIs expose task callback and queue status', async () => {
       pageSize,
       total: 1,
       totalPages: 1
-    })
+    }),
+    getKnownNodeIds: async () => ['main']
   } as unknown as AsyncTaskStore;
   const fakeQueueClients = {
     connection: {
@@ -438,6 +441,9 @@ test('admin async APIs expose task callback and queue status', async () => {
       mget: async () => [
         JSON.stringify({
           worker_id: 'worker_1',
+          node_id: 'main',
+          advertised_ip: '203.0.113.10',
+          queue_name: 'image-tasks-main',
           role: 'worker',
           hostname: 'node-1',
           ip_addresses: ['172.24.0.8'],
@@ -464,14 +470,17 @@ test('admin async APIs expose task callback and queue status', async () => {
         })
       ]
     },
-    taskQueue: {
-      getJobCounts: async () => ({
-        waiting: 3,
-        active: 1,
-        delayed: 2,
-        completed: 9,
-        failed: 1,
-        paused: 0
+    taskQueues: {
+      get: () => ({
+        name: 'image-tasks-main',
+        getJobCounts: async () => ({
+          waiting: 3,
+          active: 1,
+          delayed: 2,
+          completed: 9,
+          failed: 1,
+          paused: 0
+        })
       })
     }
   } as unknown as QueueClients;
@@ -504,8 +513,13 @@ test('admin async APIs expose task callback and queue status', async () => {
   assert.equal(summary.json().queue.waiting, 3);
   assert.equal(summary.json().queue.failed, 1);
   assert.equal(summary.json().workers.total, 1);
+  assert.equal(summary.json().workers.instances_total, 1);
+  assert.equal(summary.json().workers.effective_capacity, 10);
   assert.equal(summary.json().workers.active_tasks, 1);
   assert.equal(summary.json().workers.image_processing_concurrency, 10);
+  assert.equal(summary.json().workers.data[0].node_id, 'main');
+  assert.equal(summary.json().workers.data[0].advertised_ip, '203.0.113.10');
+  assert.equal(summary.json().workers.data[0].instances[0].hostname, 'node-1');
   assert.equal(summary.json().workers.data[0].current_tasks[0].client_task_id, 'task_2');
 
   const tasks = await app.inject({
@@ -518,6 +532,7 @@ test('admin async APIs expose task callback and queue status', async () => {
   assert.equal(tasks.statusCode, 200);
   assert.equal(tasks.json().data[0].client_task_id, 'task_1');
   assert.equal(tasks.json().data[0].first_image_url, 'https://img.example.com/images/test.png');
+  assert.equal(tasks.json().data[0].assigned_node_id, 'main');
   assert.equal(tasks.json().data[0].duration_ms, 9000);
 
   const filteredTasks = await app.inject({

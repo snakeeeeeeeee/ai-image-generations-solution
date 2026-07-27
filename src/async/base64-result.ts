@@ -6,8 +6,8 @@ import type { Base64TaskResultPayload } from './types.js';
 export const BASE64_RESULT_MAX_BYTES = 100 * 1024 * 1024;
 const BASE64_RESULT_TTL_SECONDS = 10 * 60;
 
-function keyForTask(providerTaskId: string): string {
-  return `image-task:base64-result:${providerTaskId}`;
+function keyForTask(providerTaskId: string, assignmentVersion: number): string {
+  return `image-task:base64-result:${providerTaskId}:v${assignmentVersion}`;
 }
 
 export function extractBase64TaskResult(
@@ -53,6 +53,7 @@ export function extractBase64TaskResult(
 export async function writeBase64TaskResult(
   redis: Redis | undefined,
   providerTaskId: string,
+  assignmentVersion: number,
   result: Base64TaskResultPayload
 ): Promise<void> {
   if (!redis) {
@@ -67,7 +68,7 @@ export async function writeBase64TaskResult(
   }
 
   await redis.set(
-    keyForTask(providerTaskId),
+    keyForTask(providerTaskId, assignmentVersion),
     JSON.stringify({
       result_data_format: 'base64',
       result
@@ -77,8 +78,12 @@ export async function writeBase64TaskResult(
   );
 }
 
-export async function readBase64TaskResult(redis: Redis, providerTaskId: string): Promise<Base64TaskResultPayload | undefined> {
-  const raw = await redis.get(keyForTask(providerTaskId));
+export async function readBase64TaskResult(
+  redis: Redis,
+  providerTaskId: string,
+  assignmentVersion: number
+): Promise<Base64TaskResultPayload | undefined> {
+  const raw = await redis.get(keyForTask(providerTaskId, assignmentVersion));
   if (!raw) {
     return undefined;
   }

@@ -77,6 +77,7 @@ export function startAsyncWorker({
   store: AsyncTaskStore;
   taskQueue: Queue<TaskQueuePayload>;
 }): AsyncWorkerRuntime {
+  const nodeId = requireWorkerNodeId(config);
   const r2Client = createR2Client(config.r2);
   const upstreamDispatcher = new Agent({
     headersTimeout: config.upstream.timeoutMs,
@@ -91,7 +92,7 @@ export function startAsyncWorker({
     console.error('worker heartbeat write failed', error);
   });
 
-  const worker = createImageTaskWorker(config, async (job: Job<TaskQueuePayload>) => {
+  const worker = createImageTaskWorker(config, nodeId, async (job: Job<TaskQueuePayload>) => {
     await processTask({
       job,
       config,
@@ -107,7 +108,7 @@ export function startAsyncWorker({
   });
 
   const recoveryInterval = setInterval(() => {
-    void recoverQueuedTasks({ config, store, taskQueue }).catch((error) => {
+    void recoverQueuedTasks({ nodeId, store, taskQueue }).catch((error) => {
       worker.emit('error', error instanceof Error ? error : new Error(String(error)));
     });
   }, 60_000);
@@ -158,8 +159,30 @@ export async function processTask({
   runtimeState?: WorkerRuntimeState;
   upload?: UploadImageToR2;
 }): Promise<void> {
-  const claimed = await store.claimTask(job.data.provider_task_id);
+  const workerNodeId = requireWorkerNodeId(config);
+  if (job.data.node_id !== workerNodeId) {
+    logAssignmentRejected({
+      providerTaskId: job.data.provider_task_id,
+      workerNodeId,
+      payloadNodeId: job.data.node_id,
+      assignmentVersion: job.data.assignment_version,
+      stage: 'queue'
+    });
+    return;
+  }
+  const claimed = await store.claimTask(
+    job.data.provider_task_id,
+    workerNodeId,
+    job.data.assignment_version
+  );
   if (!claimed) {
+    logAssignmentRejected({
+      providerTaskId: job.data.provider_task_id,
+      workerNodeId,
+      payloadNodeId: job.data.node_id,
+      assignmentVersion: job.data.assignment_version,
+      stage: 'claim'
+    });
     return;
   }
   runtimeState ? trackWorkerTaskStart(runtimeState, claimed) : undefined;
@@ -197,6 +220,7 @@ export async function processTask({
         await writeBase64TaskResult(
           base64ResultRedis,
           claimed.provider_task_id,
+          claimed.assignment_version,
           extractBase64TaskResult(result.upstreamResponse)
         );
       }
@@ -209,7 +233,7 @@ export async function processTask({
         rawResponse: safeRaw
       });
 
-      await store.completeTask({
+      const completed = await store.completeTask({
         providerTaskId: claimed.provider_task_id,
         status: 'succeeded',
         result: {
@@ -220,8 +244,21 @@ export async function processTask({
         },
         usage: usagePayload,
         error: null,
-        callbackPayload
+        callbackPayload,
+        nodeId: workerNodeId,
+        assignmentVersion: claimed.assignment_version
       });
+      if (!completed) {
+        logAssignmentRejected({
+          providerTaskId: claimed.provider_task_id,
+          workerNodeId,
+          payloadNodeId: job.data.node_id,
+          assignmentVersion: claimed.assignment_version,
+          stage: 'complete'
+        });
+        runtimeState ? trackWorkerTaskRetry(runtimeState, claimed.provider_task_id, 'stale_assignment') : undefined;
+        return;
+      }
       runtimeState ? trackWorkerTaskFinish(runtimeState, claimed.provider_task_id, 'succeeded') : undefined;
     } finally {
       releaseImageProcessing();
@@ -230,19 +267,25 @@ export async function processTask({
     const taskError = toTaskError(error);
     if (taskError.retryable && claimed.attempts < MAX_DIRECT_EXECUTE_ATTEMPTS) {
       const delayMs = retryDelayMs(claimed.attempts);
-      const queued = await store.retryTask(claimed.provider_task_id, taskError);
+      const queued = await store.retryTask(
+        claimed.provider_task_id,
+        taskError,
+        workerNodeId,
+        claimed.assignment_version
+      );
       if (queued) {
-        await enqueueImageTask(taskQueue, claimed.provider_task_id, {
-          delay: delayMs,
-          jobId: `${claimed.provider_task_id}:retry:${claimed.attempts}`
-        });
+        await enqueueImageTask(taskQueue, {
+          provider_task_id: claimed.provider_task_id,
+          node_id: workerNodeId,
+          assignment_version: claimed.assignment_version
+        }, claimed.attempts, { delay: delayMs });
         runtimeState ? trackWorkerTaskRetry(runtimeState, claimed.provider_task_id, taskError.code) : undefined;
         return;
       }
     }
 
     const safeRaw = sanitizeRawResponse(extractCauseBody(error), config.asyncTasks.rawResponseMaxBytes);
-    await store.completeTask({
+    const completed = await store.completeTask({
       providerTaskId: claimed.provider_task_id,
       status: 'failed',
       result: {
@@ -259,27 +302,72 @@ export async function processTask({
         usage: null,
         error: taskError,
         rawResponse: safeRaw
-      })
+      }),
+      nodeId: workerNodeId,
+      assignmentVersion: claimed.assignment_version
     });
+    if (!completed) {
+      logAssignmentRejected({
+        providerTaskId: claimed.provider_task_id,
+        workerNodeId,
+        payloadNodeId: job.data.node_id,
+        assignmentVersion: claimed.assignment_version,
+        stage: 'complete'
+      });
+      runtimeState ? trackWorkerTaskRetry(runtimeState, claimed.provider_task_id, 'stale_assignment') : undefined;
+      return;
+    }
     runtimeState ? trackWorkerTaskFinish(runtimeState, claimed.provider_task_id, 'failed', taskError.code) : undefined;
   }
 }
 
 async function recoverQueuedTasks({
-  config,
+  nodeId,
   store,
   taskQueue
 }: {
-  config: AppConfig;
+  nodeId: string;
   store: AsyncTaskStore;
   taskQueue: Queue<TaskQueuePayload>;
 }): Promise<void> {
-  const staleIds = await store.requeueStaleProcessing(config.asyncTasks.taskStaleProcessingTimeoutSeconds);
-  const queuedIds = await store.getQueuedTaskIds(100);
-  const ids = [...new Set([...staleIds, ...queuedIds])];
-  for (const id of ids) {
-    await enqueueImageTask(taskQueue, id);
+  const assignments = await store.getQueuedTaskAssignmentsForNode(nodeId, 100);
+  for (const assignment of assignments) {
+    await enqueueImageTask(taskQueue, {
+      provider_task_id: assignment.provider_task_id,
+      node_id: assignment.assigned_node_id,
+      assignment_version: assignment.assignment_version
+    }, assignment.attempts);
   }
+}
+
+function requireWorkerNodeId(config: AppConfig): string {
+  if (!config.asyncTasks.workerNodeId) {
+    throw new Error('WORKER_NODE_ID is required for async worker');
+  }
+  return config.asyncTasks.workerNodeId;
+}
+
+function logAssignmentRejected({
+  providerTaskId,
+  workerNodeId,
+  payloadNodeId,
+  assignmentVersion,
+  stage
+}: {
+  providerTaskId: string;
+  workerNodeId: string;
+  payloadNodeId: string;
+  assignmentVersion: number;
+  stage: 'queue' | 'claim' | 'complete';
+}): void {
+  console.warn('image task assignment rejected', {
+    event: 'worker_assignment_rejected',
+    provider_task_id: providerTaskId,
+    worker_node_id: workerNodeId,
+    payload_node_id: payloadNodeId,
+    assignment_version: assignmentVersion,
+    stage
+  });
 }
 
 function buildCallbackPayload({

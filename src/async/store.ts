@@ -15,6 +15,7 @@ import { AppError } from '../errors.js';
 
 const { Pool } = pg;
 const MIGRATION_LOCK_ID = 2026062201;
+const SCHEDULER_LOCK_ID = 2026072701;
 
 type PoolClient = pg.PoolClient;
 
@@ -38,6 +39,8 @@ interface TaskRow {
   usage_json: unknown | null;
   error_json: unknown | null;
   attempts: number;
+  assigned_node_id: string | null;
+  assignment_version: number;
   created_at: Date;
   started_at: Date | null;
   finished_at: Date | null;
@@ -91,6 +94,8 @@ export interface AdminAsyncTaskRecord {
   raw_response_truncated?: boolean;
   raw_response_omitted_fields?: string[];
   attempts: number;
+  assigned_node_id?: string;
+  assignment_version: number;
   image_count: number;
   first_image_url?: string;
   error_code?: string;
@@ -135,6 +140,25 @@ export interface AdminPage<T> {
   totalPages: number;
 }
 
+export interface SchedulingNode {
+  nodeId: string;
+  capacity: number;
+}
+
+export interface TaskAssignmentResult {
+  task: AsyncTaskRecord;
+  changed: boolean;
+  reason?: 'submitted' | 'queued_node_offline' | 'processing_stale';
+  previousNodeId?: string;
+}
+
+export interface QueuedTaskAssignment {
+  provider_task_id: string;
+  assigned_node_id: string;
+  assignment_version: number;
+  attempts: number;
+}
+
 export class AsyncTaskStore {
   readonly pool: pg.Pool;
 
@@ -174,6 +198,8 @@ export class AsyncTaskStore {
           usage_json JSONB,
           error_json JSONB,
           attempts INTEGER NOT NULL DEFAULT 0,
+          assigned_node_id TEXT,
+          assignment_version INTEGER NOT NULL DEFAULT 0,
           created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
           started_at TIMESTAMPTZ,
           finished_at TIMESTAMPTZ,
@@ -189,6 +215,12 @@ export class AsyncTaskStore {
 
         CREATE INDEX IF NOT EXISTS idx_image_tasks_request_id
           ON image_tasks(request_id);
+
+        CREATE TABLE IF NOT EXISTS image_task_scheduler_nodes (
+          node_id TEXT PRIMARY KEY,
+          last_assignment_seq BIGINT NOT NULL DEFAULT 0,
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
 
         CREATE TABLE IF NOT EXISTS callback_events (
           event_id TEXT PRIMARY KEY,
@@ -216,6 +248,18 @@ export class AsyncTaskStore {
       await client.query(`
         ALTER TABLE image_tasks
           ADD COLUMN IF NOT EXISTS request_fingerprint TEXT NOT NULL DEFAULT ''
+      `);
+      await client.query(`
+        ALTER TABLE image_tasks
+          ADD COLUMN IF NOT EXISTS assigned_node_id TEXT
+      `);
+      await client.query(`
+        ALTER TABLE image_tasks
+          ADD COLUMN IF NOT EXISTS assignment_version INTEGER NOT NULL DEFAULT 0
+      `);
+      await client.query(`
+        CREATE INDEX IF NOT EXISTS idx_image_tasks_status_node_updated_at
+          ON image_tasks(status, assigned_node_id, updated_at)
       `);
       await client.query('COMMIT');
     } catch (error) {
@@ -248,7 +292,7 @@ export class AsyncTaskStore {
         callback_json,
         metadata_json
       ) VALUES (
-        $1, $2, $3, $4, $5, $6, $7, $8, 'queued', $9, $10, $11, $12, $13, $14
+        $1, $2, $3, $4, $5, $6, $7, $8, 'submitted', $9, $10, $11, $12, $13, $14
       )
       ON CONFLICT (provider_api_key_hash, client_task_id) DO NOTHING
       RETURNING *
@@ -310,7 +354,7 @@ export class AsyncTaskStore {
     return result.rows.map(mapTaskRow);
   }
 
-  async claimTask(providerTaskId: string): Promise<AsyncTaskRecord | undefined> {
+  async claimTask(providerTaskId: string, nodeId: string, assignmentVersion: number): Promise<AsyncTaskRecord | undefined> {
     const result = await this.pool.query<TaskRow>(`
       UPDATE image_tasks
       SET status = 'processing',
@@ -318,9 +362,11 @@ export class AsyncTaskStore {
           started_at = COALESCE(started_at, now()),
           updated_at = now()
       WHERE provider_task_id = $1
-        AND status IN ('submitted', 'queued')
+        AND status = 'queued'
+        AND assigned_node_id = $2
+        AND assignment_version = $3
       RETURNING *
-    `, [providerTaskId]);
+    `, [providerTaskId, nodeId, assignmentVersion]);
     return result.rows[0] ? mapTaskRow(result.rows[0]) : undefined;
   }
 
@@ -330,7 +376,9 @@ export class AsyncTaskStore {
     result,
     usage,
     error,
-    callbackPayload
+    callbackPayload,
+    nodeId,
+    assignmentVersion
   }: {
     providerTaskId: string;
     status: 'succeeded' | 'failed';
@@ -338,6 +386,8 @@ export class AsyncTaskStore {
     usage: Record<string, unknown> | null;
     error: AsyncTaskError | null;
     callbackPayload: Record<string, unknown> | null;
+    nodeId: string;
+    assignmentVersion: number;
   }): Promise<AsyncTaskRecord | undefined> {
     const client = await this.pool.connect();
     try {
@@ -351,9 +401,11 @@ export class AsyncTaskStore {
             finished_at = now(),
             updated_at = now()
         WHERE provider_task_id = $1
-          AND status NOT IN ('succeeded', 'failed')
+          AND status = 'processing'
+          AND assigned_node_id = $6
+          AND assignment_version = $7
         RETURNING *
-      `, [providerTaskId, status, result, usage, error]);
+      `, [providerTaskId, status, result, usage, error, nodeId, assignmentVersion]);
 
       const row = updated.rows[0];
       if (row && callbackPayload) {
@@ -377,7 +429,12 @@ export class AsyncTaskStore {
     }
   }
 
-  async retryTask(providerTaskId: string, error: AsyncTaskError): Promise<boolean> {
+  async retryTask(
+    providerTaskId: string,
+    error: AsyncTaskError,
+    nodeId: string,
+    assignmentVersion: number
+  ): Promise<boolean> {
     const result = await this.pool.query<{ provider_task_id: string }>(`
       UPDATE image_tasks
       SET status = 'queued',
@@ -385,32 +442,171 @@ export class AsyncTaskStore {
           updated_at = now()
       WHERE provider_task_id = $1
         AND status = 'processing'
+        AND assigned_node_id = $3
+        AND assignment_version = $4
       RETURNING provider_task_id
-    `, [providerTaskId, error]);
+    `, [providerTaskId, error, nodeId, assignmentVersion]);
     return (result.rowCount ?? 0) > 0;
   }
 
-  async requeueStaleProcessing(timeoutSeconds: number): Promise<string[]> {
-    const result = await this.pool.query<{ provider_task_id: string }>(`
-      UPDATE image_tasks
-      SET status = 'queued',
-          updated_at = now()
-      WHERE status = 'processing'
-        AND updated_at < now() - ($1::int * interval '1 second')
-      RETURNING provider_task_id
-    `, [timeoutSeconds]);
-    return result.rows.map((row) => row.provider_task_id);
-  }
-
-  async getQueuedTaskIds(limit: number): Promise<string[]> {
+  async getTasksNeedingAssignment(
+    onlineNodeIds: string[],
+    staleProcessingTimeoutSeconds: number,
+    limit: number
+  ): Promise<string[]> {
     const result = await this.pool.query<{ provider_task_id: string }>(`
       SELECT provider_task_id
       FROM image_tasks
-      WHERE status IN ('submitted', 'queued')
+      WHERE status = 'submitted'
+         OR (
+           status = 'queued'
+           AND (
+             assigned_node_id IS NULL
+             OR NOT (assigned_node_id = ANY($1::text[]))
+           )
+         )
+         OR (
+           status = 'processing'
+           AND (
+             assigned_node_id IS NULL
+             OR NOT (assigned_node_id = ANY($1::text[]))
+           )
+           AND updated_at < now() - ($2::int * interval '1 second')
+         )
       ORDER BY created_at ASC
-      LIMIT $1
-    `, [limit]);
+      LIMIT $3
+    `, [onlineNodeIds, staleProcessingTimeoutSeconds, limit]);
     return result.rows.map((row) => row.provider_task_id);
+  }
+
+  async assignTask(
+    providerTaskId: string,
+    nodes: SchedulingNode[],
+    staleProcessingTimeoutSeconds: number
+  ): Promise<TaskAssignmentResult | undefined> {
+    if (nodes.length === 0) {
+      const task = await this.getTask(providerTaskId);
+      return task ? { task, changed: false } : undefined;
+    }
+
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('SELECT pg_advisory_xact_lock($1)', [SCHEDULER_LOCK_ID]);
+      const selected = await client.query<TaskRow>(`
+        SELECT *
+        FROM image_tasks
+        WHERE provider_task_id = $1
+        FOR UPDATE
+      `, [providerTaskId]);
+      const row = selected.rows[0];
+      if (!row) {
+        await client.query('COMMIT');
+        return undefined;
+      }
+
+      const onlineNodeIds = new Set(nodes.map((node) => node.nodeId));
+      const staleBeforeMs = Date.now() - staleProcessingTimeoutSeconds * 1000;
+      const reason = assignmentReason(row, onlineNodeIds, staleBeforeMs);
+      if (!reason) {
+        await client.query('COMMIT');
+        return {
+          task: mapTaskRow(row),
+          changed: false
+        };
+      }
+
+      for (const node of nodes) {
+        await client.query(`
+          INSERT INTO image_task_scheduler_nodes (node_id)
+          VALUES ($1)
+          ON CONFLICT (node_id) DO NOTHING
+        `, [node.nodeId]);
+      }
+
+      const loads = await client.query<{ assigned_node_id: string; load: string }>(`
+        SELECT assigned_node_id, COUNT(*)::text AS load
+        FROM image_tasks
+        WHERE assigned_node_id = ANY($1::text[])
+          AND status IN ('queued', 'processing')
+          AND provider_task_id <> $2
+        GROUP BY assigned_node_id
+      `, [[...onlineNodeIds], providerTaskId]);
+      const loadByNode = new Map(loads.rows.map((item) => [
+        item.assigned_node_id,
+        Number.parseInt(item.load, 10)
+      ]));
+      const assignmentState = await client.query<{ node_id: string; last_assignment_seq: string }>(`
+        SELECT node_id, last_assignment_seq::text
+        FROM image_task_scheduler_nodes
+        WHERE node_id = ANY($1::text[])
+      `, [[...onlineNodeIds]]);
+      const lastAssignmentByNode = new Map(assignmentState.rows.map((item) => [
+        item.node_id,
+        Number.parseInt(item.last_assignment_seq, 10)
+      ]));
+      const target = chooseSchedulingNode(nodes, loadByNode, lastAssignmentByNode);
+      const nextSequence = await client.query<{ last_assignment_seq: string }>(`
+        WITH next_sequence AS (
+          SELECT COALESCE(MAX(last_assignment_seq), 0) + 1 AS value
+          FROM image_task_scheduler_nodes
+        )
+        UPDATE image_task_scheduler_nodes
+        SET last_assignment_seq = next_sequence.value,
+            updated_at = now()
+        FROM next_sequence
+        WHERE node_id = $1
+        RETURNING last_assignment_seq::text
+      `, [target.nodeId]);
+      if (!nextSequence.rows[0]) {
+        throw new Error(`Scheduler state missing for node ${target.nodeId}`);
+      }
+
+      const updated = await client.query<TaskRow>(`
+        UPDATE image_tasks
+        SET status = 'queued',
+            assigned_node_id = $2,
+            assignment_version = assignment_version + 1,
+            started_at = NULL,
+            finished_at = NULL,
+            updated_at = now()
+        WHERE provider_task_id = $1
+        RETURNING *
+      `, [providerTaskId, target.nodeId]);
+      await client.query('COMMIT');
+      return {
+        task: mapTaskRow(updated.rows[0]),
+        changed: true,
+        reason,
+        previousNodeId: row.assigned_node_id ?? undefined
+      };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async getQueuedTaskAssignmentsForNode(nodeId: string, limit: number): Promise<QueuedTaskAssignment[]> {
+    const result = await this.pool.query<QueuedTaskAssignment>(`
+      SELECT provider_task_id, assigned_node_id, assignment_version, attempts
+      FROM image_tasks
+      WHERE status = 'queued'
+        AND assigned_node_id = $1
+      ORDER BY updated_at ASC
+      LIMIT $2
+    `, [nodeId, limit]);
+    return result.rows;
+  }
+
+  async getKnownNodeIds(): Promise<string[]> {
+    const result = await this.pool.query<{ node_id: string }>(`
+      SELECT node_id
+      FROM image_task_scheduler_nodes
+      ORDER BY node_id ASC
+    `);
+    return result.rows.map((row) => row.node_id);
   }
 
   async getAdminTaskSummary(): Promise<AdminAsyncTaskSummary> {
@@ -697,6 +893,8 @@ function mapTaskRow(row: TaskRow): AsyncTaskRecord {
     usage: row.usage_json ? safeObject(row.usage_json) : null,
     error: row.error_json ? safeObject(row.error_json) as unknown as AsyncTaskError : null,
     attempts: row.attempts,
+    assigned_node_id: row.assigned_node_id ?? undefined,
+    assignment_version: row.assignment_version,
     created_at: row.created_at.toISOString(),
     started_at: dateToIso(row.started_at),
     finished_at: dateToIso(row.finished_at),
@@ -732,6 +930,8 @@ function mapAdminTaskRow(row: TaskRow, nowMs = Date.now()): AdminAsyncTaskRecord
     raw_response_truncated: typeof result.raw_response_truncated === 'boolean' ? result.raw_response_truncated : undefined,
     raw_response_omitted_fields: rawResponseOmittedFields,
     attempts: row.attempts,
+    assigned_node_id: row.assigned_node_id ?? undefined,
+    assignment_version: row.assignment_version,
     image_count: images.length,
     first_image_url: firstImage?.url,
     error_code: error?.code,
@@ -742,6 +942,47 @@ function mapAdminTaskRow(row: TaskRow, nowMs = Date.now()): AdminAsyncTaskRecord
     duration_ms: taskDurationMs(row.started_at, row.finished_at, nowMs),
     updated_at: row.updated_at.toISOString()
   };
+}
+
+function assignmentReason(
+  row: TaskRow,
+  onlineNodeIds: Set<string>,
+  staleBeforeMs: number
+): TaskAssignmentResult['reason'] | undefined {
+  if (row.status === 'submitted') {
+    return 'submitted';
+  }
+  const assignedNodeIsOnline = row.assigned_node_id !== null && onlineNodeIds.has(row.assigned_node_id);
+  if (row.status === 'queued' && !assignedNodeIsOnline) {
+    return 'queued_node_offline';
+  }
+  if (
+    row.status === 'processing' &&
+    !assignedNodeIsOnline &&
+    row.updated_at.getTime() < staleBeforeMs
+  ) {
+    return 'processing_stale';
+  }
+  return undefined;
+}
+
+export function chooseSchedulingNode(
+  nodes: SchedulingNode[],
+  loadByNode: Map<string, number>,
+  lastAssignmentByNode: Map<string, number>
+): SchedulingNode {
+  return [...nodes].sort((left, right) => {
+    const leftLoad = loadByNode.get(left.nodeId) ?? 0;
+    const rightLoad = loadByNode.get(right.nodeId) ?? 0;
+    const loadComparison = leftLoad * right.capacity - rightLoad * left.capacity;
+    if (loadComparison !== 0) {
+      return loadComparison;
+    }
+    const sequenceComparison =
+      (lastAssignmentByNode.get(left.nodeId) ?? 0) -
+      (lastAssignmentByNode.get(right.nodeId) ?? 0);
+    return sequenceComparison !== 0 ? sequenceComparison : left.nodeId.localeCompare(right.nodeId);
+  })[0];
 }
 
 function taskDurationMs(startedAt: Date | null, finishedAt: Date | null, nowMs: number): number | undefined {

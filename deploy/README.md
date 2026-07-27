@@ -133,13 +133,17 @@ RAW_RESPONSE_MAX_BYTES=262144
 SYNC_TASK_TIMEOUT_MS=300000
 SYNC_TASK_POLL_INTERVAL_MS=500
 SYNC_WAIT_CONCURRENCY=200
+WORKER_NODE_ID=main
+WORKER_ADVERTISED_IP=<主节点实际 IPv4 或 IPv6>
 WORKER_HEARTBEAT_INTERVAL_MS=5000
 WORKER_HEARTBEAT_TTL_SECONDS=15
 ```
 
 `/v1/image/tasks/sync` 是同步等待包装接口，任务仍由 worker 执行；超过 `SYNC_TASK_TIMEOUT_MS` 后接口返回当前状态，后台任务继续执行。`UPSTREAM_API_KEY` 只影响旧同步兼容接口，不参与异步 direct lease 执行。
 
-worker 会按 `WORKER_HEARTBEAT_INTERVAL_MS` 写 Redis 心跳，心跳 key 过期时间由 `WORKER_HEARTBEAT_TTL_SECONDS` 控制；管理台的任务队列页会据此展示在线 worker、当前任务和每个节点的简单计数。
+worker 会按 `WORKER_HEARTBEAT_INTERVAL_MS` 写 Redis 心跳，心跳 key 过期时间由 `WORKER_HEARTBEAT_TTL_SECONDS` 控制。`WORKER_NODE_ID` 只能包含小写字母、数字、点、下划线和短横线，最长 64 个字符；`WORKER_ADVERTISED_IP` 必须是显式 IPv4/IPv6。管理台按节点聚合实例，主标题展示 node ID 和实际 IP，容器 hostname、PID 和容器 IP 作为诊断信息。
+
+API 将任务写为 `submitted` 后，在 PostgreSQL advisory lock 内按 `(queued + processing) / 有效容量` 选择节点并投递到 `image-tasks-<WORKER_NODE_ID>`。有效容量是同一节点所有实例 `min(WORKER_CONCURRENCY, IMAGE_PROCESSING_CONCURRENCY)` 的总和；同负载节点按最久未分配顺序轮转。没有在线节点时任务保持 `submitted`，API 每个心跳周期自动重试分配。
 
 主节点自带 PG/Redis 时，`.env` 里的连接串保持容器内服务名：
 
@@ -207,6 +211,8 @@ IMAGE_API_HOST_PORT=8877
 cd deploy
 cp .env.prod.example .env
 # POSTGRES_URL 和 REDIS_URL 必须指向同一套生产共享服务。
+# 设置 WORKER_NODE_ID=worker-01
+# 设置 WORKER_ADVERTISED_IP=<该处理节点实际 IPv4 或 IPv6>
 ./image-handle.sh --env worker start all
 ```
 
@@ -223,6 +229,17 @@ NEW_API_BASE_URL=http://newapi-master:3000
 POSTGRES_URL=postgres://image_handle:<强密码>@<主节点内网IP>:5432/image_handle
 REDIS_URL=redis://:<强密码>@<主节点内网IP>:6379
 ```
+
+## 从共享队列升级到节点队列
+
+本次升级不同时消费旧的 `image-tasks` 共享队列。发布时先暂停 new-api 新任务提交，确认旧队列 `waiting=0`、`active=0`，并备份 PostgreSQL。所有节点构建或拉取同一个版本镜像后：
+
+1. 主节点 `.env` 设置 `WORKER_NODE_ID=main` 和主机实际 IP。
+2. 每个远程节点设置唯一 ID（例如 `worker-01`）和各自实际 IP。
+3. 先更新并启动 `image-api`，让它执行新增字段和调度状态表迁移。
+4. 再更新全部 worker；管理台确认所有节点在线、实际 IP 正确后恢复提交。
+
+queued 任务在节点心跳过期后立即改派；processing 任务只有在节点离线且超过 `TASK_STALE_PROCESSING_TIMEOUT_SECONDS` 后才改派。旧 assignment 即使晚到，也不能完成任务或生成 callback。
 
 `docker-compose.worker.yml` 用于新增处理节点，要求 `IMAGE_HANDLE_IMAGE` 指向本机已有或镜像仓库可拉取的镜像。
 

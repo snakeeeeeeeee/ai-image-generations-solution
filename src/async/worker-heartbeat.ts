@@ -1,8 +1,10 @@
 import { randomUUID } from 'node:crypto';
+import { isIP } from 'node:net';
 import { hostname, networkInterfaces } from 'node:os';
 import type { Redis } from 'ioredis';
 import type { AppConfig } from '../config.js';
 import type { AsyncTaskRecord } from './types.js';
+import { imageTaskQueueName } from './queue.js';
 
 const WORKER_HEARTBEAT_PREFIX = 'image:runtime:worker:';
 
@@ -16,6 +18,9 @@ export interface WorkerCurrentTask {
 
 export interface WorkerHeartbeat {
   worker_id: string;
+  node_id: string;
+  advertised_ip: string;
+  queue_name: string;
   role: 'worker';
   hostname: string;
   ip_addresses: string[];
@@ -40,6 +45,30 @@ export interface WorkerRuntimeState {
   completedSinceStart: number;
   failedSinceStart: number;
   lastErrorCode?: string;
+}
+
+export interface WorkerNodeHeartbeat {
+  node_id: string;
+  advertised_ip: string;
+  advertised_ips: string[];
+  queue_name: string;
+  identity_conflict: boolean;
+  instance_count: number;
+  effective_capacity: number;
+  worker_concurrency: number;
+  image_processing_concurrency: number;
+  active_tasks: number;
+  completed_since_start: number;
+  failed_since_start: number;
+  rss_bytes: number;
+  heap_used_bytes: number;
+  started_at: string;
+  last_seen_at: string;
+  hostnames: string[];
+  ip_addresses: string[];
+  current_tasks: WorkerCurrentTask[];
+  last_error_code?: string;
+  instances: WorkerHeartbeat[];
 }
 
 export function createWorkerRuntimeState(): WorkerRuntimeState {
@@ -94,6 +123,9 @@ export async function writeWorkerHeartbeat({
   const memory = process.memoryUsage();
   const heartbeat: WorkerHeartbeat = {
     worker_id: state.workerId,
+    node_id: requireWorkerNodeId(config),
+    advertised_ip: requireWorkerAdvertisedIp(config),
+    queue_name: imageTaskQueueName(requireWorkerNodeId(config)),
     role: 'worker',
     hostname: hostname(),
     ip_addresses: getIpAddresses(),
@@ -136,6 +168,57 @@ export async function readWorkerHeartbeats(redis: Redis): Promise<WorkerHeartbea
     .sort((left, right) => right.last_seen_at.localeCompare(left.last_seen_at));
 }
 
+export function aggregateWorkerNodes(heartbeats: WorkerHeartbeat[]): WorkerNodeHeartbeat[] {
+  const grouped = new Map<string, WorkerHeartbeat[]>();
+  for (const heartbeat of heartbeats) {
+    const instances = grouped.get(heartbeat.node_id) ?? [];
+    instances.push(heartbeat);
+    grouped.set(heartbeat.node_id, instances);
+  }
+
+  return [...grouped.entries()].map(([nodeId, instances]) => {
+    const sorted = [...instances].sort((left, right) => right.last_seen_at.localeCompare(left.last_seen_at));
+    const newest = sorted[0];
+    const advertisedIps = new Set(sorted.map((instance) => instance.advertised_ip));
+    const queueNames = new Set(sorted.map((instance) => instance.queue_name));
+    if (!newest) {
+      throw new Error(`Worker node ${nodeId} has no heartbeat instances`);
+    }
+    return {
+      node_id: nodeId,
+      advertised_ip: newest.advertised_ip,
+      advertised_ips: [...advertisedIps].sort(),
+      queue_name: newest.queue_name,
+      identity_conflict: advertisedIps.size !== 1 || queueNames.size !== 1,
+      instance_count: sorted.length,
+      effective_capacity: sorted.reduce(
+        (total, instance) => total + Math.min(instance.worker_concurrency, instance.image_processing_concurrency),
+        0
+      ),
+      worker_concurrency: sorted.reduce((total, instance) => total + instance.worker_concurrency, 0),
+      image_processing_concurrency: sorted.reduce(
+        (total, instance) => total + instance.image_processing_concurrency,
+        0
+      ),
+      active_tasks: sorted.reduce((total, instance) => total + instance.active_tasks, 0),
+      completed_since_start: sorted.reduce((total, instance) => total + instance.completed_since_start, 0),
+      failed_since_start: sorted.reduce((total, instance) => total + instance.failed_since_start, 0),
+      rss_bytes: sorted.reduce((total, instance) => total + instance.rss_bytes, 0),
+      heap_used_bytes: sorted.reduce((total, instance) => total + instance.heap_used_bytes, 0),
+      started_at: sorted.reduce(
+        (earliest, instance) => instance.started_at < earliest ? instance.started_at : earliest,
+        newest.started_at
+      ),
+      last_seen_at: newest.last_seen_at,
+      hostnames: [...new Set(sorted.map((instance) => instance.hostname))].sort(),
+      ip_addresses: [...new Set(sorted.flatMap((instance) => instance.ip_addresses))].sort(),
+      current_tasks: sorted.flatMap((instance) => instance.current_tasks),
+      last_error_code: sorted.find((instance) => instance.last_error_code)?.last_error_code,
+      instances: sorted
+    };
+  }).sort((left, right) => left.node_id.localeCompare(right.node_id));
+}
+
 function workerHeartbeatKey(workerId: string): string {
   return `${WORKER_HEARTBEAT_PREFIX}${workerId}`;
 }
@@ -159,6 +242,12 @@ function parseWorkerHeartbeat(value: string | null): WorkerHeartbeat | null {
     const parsed = JSON.parse(value) as Partial<WorkerHeartbeat>;
     if (
       typeof parsed.worker_id !== 'string' ||
+      typeof parsed.node_id !== 'string' ||
+      !/^[a-z0-9._-]{1,64}$/.test(parsed.node_id) ||
+      typeof parsed.advertised_ip !== 'string' ||
+      isIP(parsed.advertised_ip) === 0 ||
+      typeof parsed.queue_name !== 'string' ||
+      parsed.queue_name !== imageTaskQueueName(parsed.node_id) ||
       parsed.role !== 'worker' ||
       typeof parsed.hostname !== 'string' ||
       typeof parsed.pid !== 'number' ||
@@ -169,6 +258,9 @@ function parseWorkerHeartbeat(value: string | null): WorkerHeartbeat | null {
     }
     return {
       worker_id: parsed.worker_id,
+      node_id: parsed.node_id,
+      advertised_ip: parsed.advertised_ip,
+      queue_name: parsed.queue_name,
       role: 'worker',
       hostname: parsed.hostname,
       ip_addresses: Array.isArray(parsed.ip_addresses)
@@ -216,7 +308,7 @@ function getIpAddresses(): string[] {
   const addresses = new Set<string>();
   for (const interfaces of Object.values(networkInterfaces())) {
     for (const item of interfaces ?? []) {
-      if (item.internal || item.family !== 'IPv4') {
+      if (item.internal || (item.family !== 'IPv4' && item.family !== 'IPv6')) {
         continue;
       }
       addresses.add(item.address);
@@ -228,4 +320,18 @@ function getIpAddresses(): string[] {
 function buildWorkerId(): string {
   const safeHostname = hostname().replace(/[^a-zA-Z0-9_.-]+/g, '-');
   return `${safeHostname}-${process.pid}-${randomUUID()}`;
+}
+
+function requireWorkerNodeId(config: AppConfig): string {
+  if (!config.asyncTasks.workerNodeId) {
+    throw new Error('WORKER_NODE_ID is required for worker heartbeat');
+  }
+  return config.asyncTasks.workerNodeId;
+}
+
+function requireWorkerAdvertisedIp(config: AppConfig): string {
+  if (!config.asyncTasks.workerAdvertisedIp) {
+    throw new Error('WORKER_ADVERTISED_IP is required for worker heartbeat');
+  }
+  return config.asyncTasks.workerAdvertisedIp;
 }

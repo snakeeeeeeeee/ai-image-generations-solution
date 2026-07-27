@@ -12,12 +12,17 @@ import { processTask } from '../src/async/worker.js';
 import { uploadImageSources } from '../src/image-runner.js';
 import { registerAsyncTaskRoutes } from '../src/async/routes.js';
 import type { AsyncTaskRecord } from '../src/async/types.js';
+import { chooseSchedulingNode } from '../src/async/store.js';
+import { AsyncTaskStore } from '../src/async/store.js';
+import { aggregateWorkerNodes, type WorkerHeartbeat } from '../src/async/worker-heartbeat.js';
 
 function buildTestConfig(overrides: Partial<AppConfig['asyncTasks']> = {}): AppConfig {
   const asyncTasks: AppConfig['asyncTasks'] = {
     postgresUrl: '',
     redisUrl: '',
     providerApiKeys: ['provider-test-key'],
+    workerNodeId: 'test-node',
+    workerAdvertisedIp: '192.0.2.10',
     workerConcurrency: 20,
     imageProcessingConcurrency: 10,
     globalRateLimitIpm: 250,
@@ -285,9 +290,11 @@ function buildTask(overrides: Partial<AsyncTaskRecord> = {}): AsyncTaskRecord {
     usage: null,
     error: null,
     attempts: 0,
+    assigned_node_id: 'test-node',
     created_at: now,
     updated_at: now,
-    ...overrides
+    ...overrides,
+    assignment_version: overrides.assignment_version ?? 1
   };
 }
 
@@ -315,6 +322,226 @@ function buildRoutePayload(clientTaskId = 'task_1'): Record<string, unknown> {
   };
 }
 
+test('scheduler rotates equal-load nodes and follows effective-capacity ratios', () => {
+  const nodes = [
+    { nodeId: 'main', capacity: 20 },
+    { nodeId: 'worker-01', capacity: 80 }
+  ];
+  const loads = new Map<string, number>();
+  const lastAssignments = new Map<string, number>();
+  let sequence = 0;
+
+  for (let index = 0; index < 100; index += 1) {
+    const selected = chooseSchedulingNode(nodes, loads, lastAssignments);
+    loads.set(selected.nodeId, (loads.get(selected.nodeId) ?? 0) + 1);
+    lastAssignments.set(selected.nodeId, ++sequence);
+  }
+
+  assert.equal(loads.get('main'), 20);
+  assert.equal(loads.get('worker-01'), 80);
+  loads.set('main', 0);
+  loads.set('worker-01', 0);
+  lastAssignments.set('main', 11);
+  lastAssignments.set('worker-01', 10);
+  assert.equal(chooseSchedulingNode(nodes, loads, lastAssignments).nodeId, 'worker-01');
+});
+
+test('database migration adds assignment columns before their compound index', async () => {
+  const store = new AsyncTaskStore('postgresql://unused');
+  const queries: string[] = [];
+  const client = {
+    query: async (sql: string) => {
+      queries.push(sql);
+      return { rows: [], rowCount: 0 };
+    },
+    release: () => undefined
+  };
+  (store.pool as unknown as { connect: () => Promise<typeof client> }).connect = async () => client;
+
+  await store.migrate();
+
+  const addNodeColumn = queries.findIndex((sql) => /ADD COLUMN IF NOT EXISTS assigned_node_id/.test(sql));
+  const addVersionColumn = queries.findIndex((sql) => /ADD COLUMN IF NOT EXISTS assignment_version/.test(sql));
+  const createAssignmentIndex = queries.findIndex((sql) => /CREATE INDEX IF NOT EXISTS idx_image_tasks_status_node_updated_at/.test(sql));
+  assert.ok(addNodeColumn >= 0);
+  assert.ok(addVersionColumn > addNodeColumn);
+  assert.ok(createAssignmentIndex > addVersionColumn);
+  assert.ok(queries.some((sql) => /CREATE TABLE IF NOT EXISTS image_task_scheduler_nodes/.test(sql)));
+  await store.close();
+});
+
+test('task assignment takes the scheduler advisory lock and increments assignment version', async () => {
+  const store = new AsyncTaskStore('postgresql://unused');
+  const now = new Date();
+  const submittedRow = {
+    provider_task_id: 'imgtask_schedule_1',
+    client_task_id: 'task_schedule_1',
+    request_id: 'req_schedule_1',
+    request_fingerprint: 'fingerprint',
+    provider_api_key_hash: 'hash',
+    provider: 'provider_direct_lease',
+    model: 'gpt-image-2',
+    operation: 'generation',
+    status: 'submitted',
+    input_json: {},
+    parameters_json: {},
+    provider_options_json: {},
+    executor_json: {
+      type: 'provider_direct_lease',
+      lease_id: 'lease_1',
+      resolve_url: 'https://api.example.com/resolve',
+      secret_id: 'image_handle_1'
+    },
+    callback_json: {},
+    metadata_json: {},
+    result_json: null,
+    usage_json: null,
+    error_json: null,
+    attempts: 0,
+    assigned_node_id: null,
+    assignment_version: 0,
+    created_at: now,
+    started_at: null,
+    finished_at: null,
+    updated_at: now
+  };
+  const queries: string[] = [];
+  const client = {
+    query: async (sql: string) => {
+      queries.push(sql);
+      if (/SELECT \*\s+FROM image_tasks/.test(sql)) {
+        return { rows: [submittedRow], rowCount: 1 };
+      }
+      if (/SELECT assigned_node_id, COUNT/.test(sql)) {
+        return { rows: [], rowCount: 0 };
+      }
+      if (/SELECT node_id, last_assignment_seq/.test(sql)) {
+        return {
+          rows: [
+            { node_id: 'main', last_assignment_seq: '0' },
+            { node_id: 'worker-01', last_assignment_seq: '0' }
+          ],
+          rowCount: 2
+        };
+      }
+      if (/WITH next_sequence/.test(sql)) {
+        return { rows: [{ last_assignment_seq: '1' }], rowCount: 1 };
+      }
+      if (/UPDATE image_tasks\s+SET status = 'queued'/.test(sql)) {
+        return {
+          rows: [{
+            ...submittedRow,
+            status: 'queued',
+            assigned_node_id: 'main',
+            assignment_version: 1,
+            updated_at: new Date()
+          }],
+          rowCount: 1
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    },
+    release: () => undefined
+  };
+  (store.pool as unknown as { connect: () => Promise<typeof client> }).connect = async () => client;
+
+  const result = await store.assignTask('imgtask_schedule_1', [
+    { nodeId: 'main', capacity: 20 },
+    { nodeId: 'worker-01', capacity: 20 }
+  ], 1800);
+
+  const lockIndex = queries.findIndex((sql) => /pg_advisory_xact_lock/.test(sql));
+  const assignmentIndex = queries.findIndex((sql) => /UPDATE image_tasks\s+SET status = 'queued'/.test(sql));
+  assert.ok(lockIndex >= 0);
+  assert.ok(assignmentIndex > lockIndex);
+  assert.equal(result?.changed, true);
+  assert.equal(result?.task.assigned_node_id, 'main');
+  assert.equal(result?.task.assignment_version, 1);
+  await store.close();
+});
+
+test('worker heartbeats aggregate multiple instances by stable node identity', () => {
+  const base: WorkerHeartbeat = {
+    worker_id: 'instance-1',
+    node_id: 'worker-01',
+    advertised_ip: '203.0.113.20',
+    queue_name: 'image-tasks-worker-01',
+    role: 'worker',
+    hostname: 'container-a',
+    ip_addresses: ['172.20.0.2'],
+    pid: 101,
+    started_at: '2026-07-27T01:00:00.000Z',
+    last_seen_at: '2026-07-27T01:01:00.000Z',
+    worker_concurrency: 20,
+    image_processing_concurrency: 10,
+    active_tasks: 2,
+    completed_since_start: 3,
+    failed_since_start: 1,
+    rss_bytes: 100,
+    heap_used_bytes: 50,
+    current_tasks: []
+  };
+
+  const [node] = aggregateWorkerNodes([
+    base,
+    {
+      ...base,
+      worker_id: 'instance-2',
+      hostname: 'container-b',
+      pid: 102,
+      worker_concurrency: 80,
+      image_processing_concurrency: 30,
+      active_tasks: 4,
+      completed_since_start: 7,
+      failed_since_start: 0,
+      rss_bytes: 200,
+      heap_used_bytes: 80,
+      last_seen_at: '2026-07-27T01:02:00.000Z'
+    }
+  ]);
+
+  assert.equal(node?.node_id, 'worker-01');
+  assert.equal(node?.advertised_ip, '203.0.113.20');
+  assert.equal(node?.instance_count, 2);
+  assert.equal(node?.effective_capacity, 40);
+  assert.equal(node?.active_tasks, 6);
+  assert.deepEqual(node?.hostnames, ['container-a', 'container-b']);
+  assert.equal(node?.identity_conflict, false);
+});
+
+test('worker rejects a job routed to a different node before claiming it', async () => {
+  let claimCalls = 0;
+  const originalWarn = console.warn;
+  console.warn = () => undefined;
+  try {
+    await processTask({
+      job: {
+        data: {
+          provider_task_id: 'imgtask_wrong_node',
+          node_id: 'worker-02',
+          assignment_version: 3
+        }
+      } as never,
+      config: buildTestConfig(),
+      store: {
+        claimTask: async () => {
+          claimCalls += 1;
+          return undefined;
+        }
+      } as never,
+      taskQueue: {} as never,
+      rateLimiter: {} as never,
+      imageProcessingLimiter: {} as never,
+      upstreamDispatcher: {} as never,
+      r2Client: {} as never
+    });
+  } finally {
+    console.warn = originalWarn;
+  }
+
+  assert.equal(claimCalls, 0);
+});
+
 test('sync async task route waits for terminal task result', async () => {
   const app = Fastify();
   let task = buildTask();
@@ -330,8 +557,8 @@ test('sync async task route waits for terminal task result', async () => {
     },
     getTask: async () => task
   };
-  const taskQueue = {
-    add: async () => {
+  const scheduler = {
+    scheduleTask: async () => {
       enqueued = true;
       setTimeout(() => {
         task = buildTask({
@@ -350,6 +577,7 @@ test('sync async task route waits for terminal task result', async () => {
           finished_at: new Date().toISOString()
         });
       }, 10);
+      return task;
     }
   };
 
@@ -360,7 +588,7 @@ test('sync async task route waits for terminal task result', async () => {
       syncTaskPollIntervalMs: 5
     }),
     store: store as never,
-    taskQueue: taskQueue as never
+    scheduler
   });
 
   const response = await app.inject({
@@ -407,8 +635,8 @@ test('sync async task route can return ephemeral base64 result', async () => {
     },
     getTask: async () => task
   };
-  const taskQueue = {
-    add: async () => {
+  const scheduler = {
+    scheduleTask: async () => {
       setTimeout(() => {
         task = buildTask({
           status: 'succeeded',
@@ -430,13 +658,14 @@ test('sync async task route can return ephemeral base64 result', async () => {
           finished_at: new Date().toISOString()
         });
       }, 10);
+      return task;
     }
   };
   const cached = new Map<string, string>();
   const redis = {
     get: async (key: string) => cached.get(key)
   };
-  cached.set('image-task:base64-result:imgtask_1', JSON.stringify({
+  cached.set('image-task:base64-result:imgtask_1:v1', JSON.stringify({
     result_data_format: 'base64',
     result: {
       images: [
@@ -455,7 +684,7 @@ test('sync async task route can return ephemeral base64 result', async () => {
       syncTaskPollIntervalMs: 5
     }),
     store: store as never,
-    taskQueue: taskQueue as never,
+    scheduler,
     base64ResultRedis: redis as never
   });
 
@@ -499,9 +728,10 @@ test('async task route marks task submission mode as async', async () => {
       };
     }
   };
-  const taskQueue = {
-    add: async () => {
+  const scheduler = {
+    scheduleTask: async () => {
       addCalls += 1;
+      return task;
     }
   };
 
@@ -510,7 +740,7 @@ test('async task route marks task submission mode as async', async () => {
       providerApiKeys: ['provider-test-key']
     }),
     store: store as never,
-    taskQueue: taskQueue as never
+    scheduler
   });
 
   const response = await app.inject({
@@ -542,8 +772,8 @@ test('async task route rejects base64 result_data_format', async () => {
       throw new Error('should not create task');
     }
   };
-  const taskQueue = {
-    add: async () => undefined
+  const scheduler = {
+    scheduleTask: async () => undefined
   };
 
   registerAsyncTaskRoutes(app, {
@@ -551,7 +781,7 @@ test('async task route rejects base64 result_data_format', async () => {
       providerApiKeys: ['provider-test-key']
     }),
     store: store as never,
-    taskQueue: taskQueue as never
+    scheduler
   });
 
   const response = await app.inject({
@@ -585,9 +815,10 @@ test('sync async task route returns processing state on wait timeout', async () 
     }),
     getTask: async () => task
   };
-  const taskQueue = {
-    add: async () => {
+  const scheduler = {
+    scheduleTask: async () => {
       addCalls += 1;
+      return task;
     }
   };
 
@@ -598,7 +829,7 @@ test('sync async task route returns processing state on wait timeout', async () 
       syncTaskPollIntervalMs: 5
     }),
     store: store as never,
-    taskQueue: taskQueue as never
+    scheduler
   });
 
   const response = await app.inject({
@@ -747,6 +978,7 @@ test('worker resolves credential lease and passes through a signed URL without d
     provider_task_id: 'imgtask_1',
     client_task_id: 'task_1',
     request_id: 'req_1',
+    request_fingerprint: 'fingerprint',
     provider_api_key_hash: 'hash',
     provider: 'provider_direct_lease',
     model: 'adobe-gpt-image-2-count',
@@ -777,6 +1009,8 @@ test('worker resolves credential lease and passes through a signed URL without d
     usage: null,
     error: null,
     attempts: 1,
+    assigned_node_id: 'test-node',
+    assignment_version: 1,
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString()
   };
@@ -791,7 +1025,7 @@ test('worker resolves credential lease and passes through a signed URL without d
       callbackPayload: Record<string, unknown> | null;
     }) => {
       completed.push(args);
-      return undefined;
+      return task;
     },
     retryTask: async () => false
   };
@@ -821,7 +1055,9 @@ test('worker resolves credential lease and passes through a signed URL without d
     await processTask({
       job: {
         data: {
-          provider_task_id: 'imgtask_1'
+          provider_task_id: 'imgtask_1',
+          node_id: 'test-node',
+          assignment_version: 1
         }
       } as never,
       config: buildTestConfig({
@@ -1062,7 +1298,7 @@ test('worker detects edit input URL MIME before forwarding multipart upstream', 
     claimTask: async () => task,
     completeTask: async (args: { status: string; result: Record<string, unknown> | null }) => {
       completed.push(args);
-      return undefined;
+      return task;
     },
     retryTask: async () => false
   };
@@ -1076,7 +1312,9 @@ test('worker detects edit input URL MIME before forwarding multipart upstream', 
     await processTask({
       job: {
         data: {
-          provider_task_id: 'imgtask_1'
+          provider_task_id: 'imgtask_1',
+          node_id: 'test-node',
+          assignment_version: 1
         }
       } as never,
       config: buildTestConfig({
@@ -1197,7 +1435,7 @@ test('worker writes requested base64 result to Redis only', async () => {
       callbackPayload: Record<string, unknown> | null;
     }) => {
       completed.push(args);
-      return undefined;
+      return task;
     },
     retryTask: async () => false
   };
@@ -1206,7 +1444,9 @@ test('worker writes requested base64 result to Redis only', async () => {
   await processTask({
     job: {
       data: {
-        provider_task_id: 'imgtask_1'
+        provider_task_id: 'imgtask_1',
+        node_id: 'test-node',
+        assignment_version: 1
       }
     } as never,
     config: buildTestConfig({
@@ -1231,7 +1471,7 @@ test('worker writes requested base64 result to Redis only', async () => {
   assert.equal(completed[0]?.status, 'succeeded');
   assert.equal(JSON.stringify(completed[0]?.result).includes(tinyPngBase64), false);
   assert.equal(JSON.stringify(completed[0]?.callbackPayload).includes(tinyPngBase64), false);
-  const cachedValue = cached.get('image-task:base64-result:imgtask_1');
+  const cachedValue = cached.get('image-task:base64-result:imgtask_1:v1');
   assert.ok(cachedValue);
   const body = JSON.parse(cachedValue) as { result: { images: Array<{ b64_json: string }> } };
   assert.equal(body.result.images[0]?.b64_json, tinyPngBase64);
@@ -1291,7 +1531,7 @@ test('worker returns upstream status code and provider error details on upstream
       callbackPayload: Record<string, unknown> | null;
     }) => {
       completed.push(args);
-      return undefined;
+      return task;
     },
     retryTask: async () => false
   };
@@ -1301,7 +1541,9 @@ test('worker returns upstream status code and provider error details on upstream
     await processTask({
       job: {
         data: {
-          provider_task_id: 'imgtask_1'
+          provider_task_id: 'imgtask_1',
+          node_id: 'test-node',
+          assignment_version: 1
         }
       } as never,
       config: buildTestConfig({

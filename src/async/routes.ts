@@ -5,17 +5,15 @@ import { AppError } from '../errors.js';
 import { sendAppError } from '../errors.js';
 import { ActiveRequestLimiter } from '../limiter.js';
 import { readBase64TaskResult } from './base64-result.js';
-import { enqueueImageTask } from './queue.js';
 import { authorizeProviderKey, normalizeAsyncTaskRequest } from './request.js';
+import type { TaskSchedulerLike } from './scheduler.js';
 import type { AsyncTaskStore } from './store.js';
 import type { AsyncTaskRecord, AsyncTaskRequest, ResultDataFormat } from './types.js';
-import type { Queue } from 'bullmq';
-import type { TaskQueuePayload } from './types.js';
 
 interface AsyncRoutesOptions {
   config: AppConfig;
   store: AsyncTaskStore;
-  taskQueue: Queue<TaskQueuePayload>;
+  scheduler: TaskSchedulerLike;
   base64ResultRedis?: Redis;
 }
 
@@ -32,14 +30,12 @@ export function registerAsyncTaskRoutes(app: FastifyInstance, options: AsyncRout
       const taskRequest = withSubmissionMode(normalizeAsyncTaskRequest(request.body), 'async');
       assertAsyncResultDataFormatSupported(taskRequest.result_data_format);
       const result = await options.store.createTask(taskRequest, providerApiKey);
-      if (result.created) {
-        await enqueueImageTask(options.taskQueue, result.task.provider_task_id);
-      }
+      const task = await options.scheduler.scheduleTask(result.task.provider_task_id) ?? result.task;
 
       return reply.status(202).send({
-        provider_task_id: result.task.provider_task_id,
-        client_task_id: result.task.client_task_id,
-        status: result.task.status
+        provider_task_id: task.provider_task_id,
+        client_task_id: task.client_task_id,
+        status: task.status
       });
     } catch (error) {
       return sendAppError(reply, error);
@@ -61,9 +57,7 @@ export function registerAsyncTaskRoutes(app: FastifyInstance, options: AsyncRout
       const providerApiKey = authorizeProviderKey(request.headers.authorization, options.config.asyncTasks.providerApiKeys);
       const taskRequest = withSubmissionMode(normalizeAsyncTaskRequest(request.body), 'sync_wait');
       const result = await options.store.createTask(taskRequest, providerApiKey);
-      if (result.created) {
-        await enqueueImageTask(options.taskQueue, result.task.provider_task_id);
-      }
+      await options.scheduler.scheduleTask(result.task.provider_task_id);
 
       const task = await waitForTaskTerminal({
         store: options.store,
@@ -195,7 +189,7 @@ async function formatSyncTaskResponse({
     });
   }
 
-  const base64Result = await readBase64TaskResult(redis, task.provider_task_id);
+  const base64Result = await readBase64TaskResult(redis, task.provider_task_id, task.assignment_version);
   if (!base64Result) {
     throw new AppError('Base64 sync task result is no longer available', {
       statusCode: 502,

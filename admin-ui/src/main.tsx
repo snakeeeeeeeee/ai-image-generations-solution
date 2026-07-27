@@ -12,6 +12,8 @@ import {
   Eye,
   ImageIcon,
   Link as LinkIcon,
+  Layers3,
+  LayoutDashboard,
   Loader2,
   Lock,
   LogOut,
@@ -22,6 +24,7 @@ import {
   Server,
   Cpu,
   UploadCloud,
+  Wrench,
   X,
   XCircle
 } from 'lucide-react';
@@ -141,6 +144,16 @@ interface QueueStats {
   completed: number;
   failed: number;
   paused: number;
+  nodes: Array<{
+    node_id: string;
+    queue_name: string;
+    waiting: number;
+    active: number;
+    delayed: number;
+    completed: number;
+    failed: number;
+    paused: number;
+  }>;
 }
 
 interface WorkerCurrentTask {
@@ -153,6 +166,9 @@ interface WorkerCurrentTask {
 
 interface WorkerHeartbeat {
   worker_id: string;
+  node_id: string;
+  advertised_ip: string;
+  queue_name: string;
   role: 'worker';
   hostname: string;
   ip_addresses: string[];
@@ -170,14 +186,40 @@ interface WorkerHeartbeat {
   current_tasks: WorkerCurrentTask[];
 }
 
+interface WorkerNodeHeartbeat {
+  node_id: string;
+  advertised_ip: string;
+  advertised_ips: string[];
+  queue_name: string;
+  identity_conflict: boolean;
+  instance_count: number;
+  effective_capacity: number;
+  worker_concurrency: number;
+  image_processing_concurrency: number;
+  active_tasks: number;
+  completed_since_start: number;
+  failed_since_start: number;
+  rss_bytes: number;
+  heap_used_bytes: number;
+  started_at: string;
+  last_seen_at: string;
+  hostnames: string[];
+  ip_addresses: string[];
+  current_tasks: WorkerCurrentTask[];
+  last_error_code?: string;
+  instances: WorkerHeartbeat[];
+}
+
 interface WorkerSummary {
   total: number;
+  instances_total: number;
   active_tasks: number;
+  effective_capacity: number;
   worker_concurrency: number;
   image_processing_concurrency: number;
   completed_since_start: number;
   failed_since_start: number;
-  data: WorkerHeartbeat[];
+  data: WorkerNodeHeartbeat[];
 }
 
 interface AsyncOverview {
@@ -208,6 +250,8 @@ interface AsyncTaskRecord {
   raw_response_truncated?: boolean;
   raw_response_omitted_fields?: string[];
   attempts: number;
+  assigned_node_id?: string;
+  assignment_version: number;
   image_count: number;
   first_image_url?: string;
   error_code?: string;
@@ -281,10 +325,17 @@ interface AdminUploadResult {
 
 type AuthState = 'checking' | 'authenticated' | 'anonymous';
 type RefreshIntervalMs = 5000 | 15000 | 30000 | 60000;
-type DashboardTab = 'sync' | 'async';
+type DashboardView = 'overview' | 'sync' | 'async' | 'images' | 'tools';
 
 const adminBasePath = new URL(import.meta.env.BASE_URL, window.location.origin).pathname.replace(/\/+$/, '');
 const adminPath = (path = '') => `${adminBasePath}${path}`;
+const dashboardViewMeta: Record<DashboardView, { title: string; eyebrow: string }> = {
+  overview: { title: '运行总览', eyebrow: '同步与异步服务' },
+  sync: { title: '同步接口', eyebrow: '请求性能与运行状态' },
+  async: { title: '异步任务', eyebrow: '队列、节点与回调' },
+  images: { title: '图片记录', eyebrow: '生成与上传结果' },
+  tools: { title: '系统工具', eyebrow: '维护与临时操作' }
+};
 const refreshIntervals: Array<{ label: string; value: RefreshIntervalMs }> = [
   { label: '5 秒', value: 5000 },
   { label: '15 秒', value: 15000 },
@@ -292,6 +343,13 @@ const refreshIntervals: Array<{ label: string; value: RefreshIntervalMs }> = [
   { label: '1 分钟', value: 60000 }
 ];
 const pageSizeOptions = [10, 20, 50, 100];
+
+function dashboardViewFromHash(): DashboardView {
+  const value = location.hash.replace(/^#/, '');
+  return value === 'sync' || value === 'async' || value === 'images' || value === 'tools'
+    ? value
+    : 'overview';
+}
 
 function App() {
   const [authState, setAuthState] = useState<AuthState>('checking');
@@ -385,7 +443,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
   const [data, setData] = useState<DashboardData | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const [activeTab, setActiveTab] = useState<DashboardTab>('sync');
+  const [activeView, setActiveView] = useState<DashboardView>(dashboardViewFromHash);
   const [refreshIntervalMs, setRefreshIntervalMs] = useState<RefreshIntervalMs>(5000);
   const [requestPage, setRequestPage] = useState(1);
   const [requestPageSize, setRequestPageSize] = useState(20);
@@ -498,6 +556,21 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
     errorPage
   ]);
 
+  useEffect(() => {
+    const syncViewFromLocation = () => setActiveView(dashboardViewFromHash());
+    window.addEventListener('popstate', syncViewFromLocation);
+    return () => window.removeEventListener('popstate', syncViewFromLocation);
+  }, []);
+
+  function navigateToView(view: DashboardView) {
+    if (view === activeView) {
+      return;
+    }
+    history.pushState(null, '', `${adminBasePath}#${view}`);
+    setActiveView(view);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
   async function logout() {
     await fetch(adminPath('/logout'), { method: 'POST' });
     history.replaceState(null, '', adminPath('/login'));
@@ -590,168 +663,391 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
   const asyncBacklog = data
     ? data.async.tasks.submitted + data.async.tasks.queued + data.async.tasks.processing + data.async.callbacks.pending + data.async.callbacks.processing
     : 0;
+  const viewMeta = dashboardViewMeta[activeView];
 
   return (
     <main className="dashboard-shell">
-      <header className="topbar">
-        <div>
-          <p className="eyebrow">图片包装服务</p>
-          <h1>监控台</h1>
+      <a className="skip-link" href="#dashboard-content">跳到主要内容</a>
+      <aside className="dashboard-sidebar">
+        <div className="sidebar-brand">
+          <span className="sidebar-brand-mark"><ImageIcon size={19} /></span>
+          <span>
+            <strong>Image Handle</strong>
+            <small>Operations</small>
+          </span>
         </div>
-        <div className="topbar-actions">
-          <label className="refresh-select">
-            <span>自动刷新</span>
-            <select
-              value={refreshIntervalMs}
-              onChange={(event) => setRefreshIntervalMs(Number(event.target.value) as RefreshIntervalMs)}
-            >
-              {refreshIntervals.map((interval) => (
-                <option key={interval.value} value={interval.value}>{interval.label}</option>
-              ))}
-            </select>
-          </label>
-          <button className="ghost-button" onClick={() => void load()} disabled={loading || refreshing}>
-            <RefreshCw size={17} className={loading || refreshing ? 'spin' : ''} />
-            刷新
-          </button>
-          <button className="ghost-button" onClick={() => void logout()}>
-            <LogOut size={17} />
-            退出
-          </button>
+
+        <nav className="dashboard-nav" aria-label="监控台视图">
+          <DashboardNavButton
+            active={activeView === 'overview'}
+            icon={<LayoutDashboard size={17} />}
+            label="运行总览"
+            onClick={() => navigateToView('overview')}
+          />
+          <DashboardNavButton
+            active={activeView === 'sync'}
+            icon={<Activity size={17} />}
+            label="同步接口"
+            onClick={() => navigateToView('sync')}
+          />
+          <DashboardNavButton
+            active={activeView === 'async'}
+            icon={<Send size={17} />}
+            label="异步任务"
+            badge={asyncBacklog > 0 ? formatNumber(asyncBacklog) : undefined}
+            onClick={() => navigateToView('async')}
+          />
+          <DashboardNavButton
+            active={activeView === 'images'}
+            icon={<ImageIcon size={17} />}
+            label="图片记录"
+            onClick={() => navigateToView('images')}
+          />
+          <DashboardNavButton
+            active={activeView === 'tools'}
+            icon={<Wrench size={17} />}
+            label="系统工具"
+            onClick={() => navigateToView('tools')}
+          />
+        </nav>
+
+        <div className="sidebar-health">
+          <span className={`health-dot ${error ? 'bad' : data ? 'ok' : 'neutral'}`} />
+          <span>
+            <strong>{error ? '数据异常' : data ? '服务已连接' : '正在连接'}</strong>
+            <small>{refreshing ? '正在刷新' : '自动监控中'}</small>
+          </span>
         </div>
-      </header>
+      </aside>
 
-      {error ? <div className="alert"><AlertTriangle size={18} />{error}</div> : null}
-
-      {data ? (
-        <>
-          <nav className="dashboard-tabs" aria-label="监控台视图">
-            <button
-              type="button"
-              className={activeTab === 'sync' ? 'active' : ''}
-              onClick={() => setActiveTab('sync')}
-              aria-pressed={activeTab === 'sync'}
-            >
-              <Activity size={16} />
-              同步接口
+      <div className="dashboard-workspace">
+        <header className="topbar">
+          <div>
+            <p className="eyebrow">{viewMeta.eyebrow}</p>
+            <h1>{viewMeta.title}</h1>
+          </div>
+          <div className="topbar-actions">
+            <label className="refresh-select">
+              <span>自动刷新</span>
+              <select
+                value={refreshIntervalMs}
+                onChange={(event) => setRefreshIntervalMs(Number(event.target.value) as RefreshIntervalMs)}
+              >
+                {refreshIntervals.map((interval) => (
+                  <option key={interval.value} value={interval.value}>{interval.label}</option>
+                ))}
+              </select>
+            </label>
+            <button className="ghost-button" onClick={() => void load()} disabled={loading || refreshing}>
+              <RefreshCw size={17} className={loading || refreshing ? 'spin' : ''} />
+              刷新
             </button>
-            <button
-              type="button"
-              className={activeTab === 'async' ? 'active' : ''}
-              onClick={() => setActiveTab('async')}
-              aria-pressed={activeTab === 'async'}
-            >
-              <Send size={16} />
-              任务队列
-              {asyncBacklog > 0 ? <span>{formatNumber(asyncBacklog)}</span> : null}
+            <button className="ghost-button logout-button" onClick={() => void logout()}>
+              <LogOut size={17} />
+              退出
             </button>
-          </nav>
+          </div>
+        </header>
 
-          {activeTab === 'sync' ? (
+        {error ? <div className="alert" role="alert"><AlertTriangle size={18} />{error}</div> : null}
+
+        <div id="dashboard-content" className="dashboard-content" tabIndex={-1}>
+          {data ? (
             <>
-              <section className={`maintenance-panel ${data.runtime.draining ? 'draining' : ''}`}>
-                <div className="maintenance-copy">
-                  <div className="maintenance-icon">
-                    <CirclePause size={20} />
-                  </div>
-                  <div>
-                    <h2>{data.runtime.draining ? '排空模式已开启' : '排空模式未开启'}</h2>
-                    <p>
-                      {data.runtime.draining
-                        ? data.runtime.safeToRestart
-                          ? '当前没有活跃生成或处理队列，可以安全重启或升级。'
-                          : '新图片请求已拒绝，已有请求会继续处理，等待队列清空后再重启。'
-                        : '开启后会拒绝新的文生图/图生图请求，已有请求继续完成。'}
-                    </p>
-                  </div>
-                </div>
-                <button
-                  className={data.runtime.draining ? 'ghost-button' : 'danger-button'}
-                  disabled={drainUpdating}
-                  onClick={() => void setDraining(!data.runtime.draining)}
-                >
-                  {drainUpdating ? <Loader2 className="spin" size={17} /> : <CirclePause size={17} />}
-                  {data.runtime.draining ? '退出排空模式' : '进入排空模式'}
-                </button>
-              </section>
+              {activeView === 'overview' ? (
+                <OperationsOverview
+                  data={data}
+                  memoryPercent={memoryPercent}
+                  asyncBacklog={asyncBacklog}
+                  onNavigate={navigateToView}
+                />
+              ) : null}
 
-              <AdminUploadPanel onUploaded={() => void load({ silent: true, requestPage: 1, imagePage: 1 })} />
+              {activeView === 'sync' ? (
+                <SyncDashboardView
+                  data={data}
+                  memoryPercent={memoryPercent}
+                  processingPercent={processingPercent}
+                  r2UploadError={r2UploadError}
+                  onErrorPageChange={changeErrorPage}
+                  onRequestPageChange={changeRequestPage}
+                  onRequestPageSizeChange={changeRequestPageSize}
+                />
+              ) : null}
 
-              <section className="status-grid">
-                <StatusTile
-                  icon={<Server size={19} />}
-                  label="服务状态"
-                  value={data.runtime.draining ? '排空中' : memoryPercent >= 90 ? '内存高水位' : '运行正常'}
-                  tone={data.runtime.draining ? 'warning' : memoryPercent >= 90 ? 'warning' : 'success'}
-                  detail={data.runtime.safeToRestart ? '可安全重启' : `RSS ${formatBytes(data.runtime.memory.rssBytes)} / ${formatBytes(data.runtime.memory.maxRssBytes)}`}
-                />
-                <StatusTile
-                  icon={<Activity size={19} />}
-                  label="生成并发"
-                  value={`${data.runtime.activeGenerations}/${data.runtime.maxConcurrentGenerations}`}
-                  detail={`等待队列 ${data.runtime.queuedGenerations}`}
-                />
-                <StatusTile
-                  icon={<UploadCloud size={19} />}
-                  label="处理队列"
-                  value={`${data.runtime.activeImageProcessing}/${data.runtime.maxConcurrentImageProcessing}`}
-                  tone={processingPercent >= 80 ? 'warning' : 'default'}
-                  detail={`等待队列 ${data.runtime.queuedImageProcessing}`}
-                />
-                <StatusTile
-                  icon={<UploadCloud size={19} />}
-                  label="R2 上传状态"
-                  value={r2UploadError ? '存在失败' : '正常'}
-                  tone={r2UploadError ? 'warning' : 'success'}
-                  detail={r2UploadError ? `失败 ${r2UploadError.count} 次` : '最近无上传错误'}
-                />
-                <StatusTile
-                  icon={<MemoryStick size={19} />}
-                  label="内存使用"
-                  value={`${memoryPercent.toFixed(1)}%`}
-                  tone={memoryPercent >= 90 ? 'danger' : memoryPercent >= 75 ? 'warning' : 'default'}
-                  detail={`Heap ${formatBytes(data.runtime.memory.heapUsedBytes)} / External ${formatBytes(data.runtime.memory.externalBytes)}`}
-                />
-              </section>
+              {activeView === 'async' ? (
+                <>
+                  <AsyncOverviewPanel overview={data.async} />
+                  <AsyncTaskTable
+                    page={data.asyncTasks}
+                    enabled={data.async.enabled}
+                    traceId={asyncTaskTraceId}
+                    onTraceSearch={searchAsyncTasks}
+                    onPageChange={changeAsyncTaskPage}
+                    onPageSizeChange={changeAsyncTaskPageSize}
+                  />
+                  <CallbackTable
+                    page={data.callbacks}
+                    enabled={data.async.enabled}
+                    onPageChange={changeCallbackPage}
+                    onPageSizeChange={changeCallbackPageSize}
+                  />
+                </>
+              ) : null}
 
-              <section className="metric-grid">
-                <MetricCard title="总请求" value={formatNumber(data.summary.total)} icon={<BarChart3 size={18} />} />
-                <MetricCard title="成功率" value={`${(data.summary.successRate * 100).toFixed(1)}%`} icon={<CheckCircle2 size={18} />} />
-                <MetricCard title="平均耗时" value={formatMs(data.summary.avgTotalMs)} icon={<Clock3 size={18} />} />
-                <MetricCard title="P95 总耗时" value={formatMs(data.summary.p95TotalMs)} icon={<Clock3 size={18} />} />
-                <MetricCard title="P95 OpenAI" value={formatMs(data.summary.p95OpenaiMs)} icon={<Server size={18} />} />
-                <MetricCard title="P95 上传" value={formatMs(data.summary.p95UploadMs)} icon={<UploadCloud size={18} />} />
-                <MetricCard title="平均图片" value={formatBytes(data.summary.avgImageBytes)} icon={<ImageIcon size={18} />} />
-                <MetricCard title="累计上传" value={formatBytes(data.summary.uploadedBytes)} icon={<Database size={18} />} />
-              </section>
+              {activeView === 'images' ? (
+                <ImageTable
+                  page={data.images}
+                  onPageChange={changeImagePage}
+                  onPageSizeChange={changeImagePageSize}
+                />
+              ) : null}
 
-              <RequestTrendChart summary={data.summary} />
-              <ErrorPanel errors={data.errors} onPageChange={changeErrorPage} />
-              <ImageTable page={data.images} onPageChange={changeImagePage} onPageSizeChange={changeImagePageSize} />
-              <RequestTable page={data.requests} onPageChange={changeRequestPage} onPageSizeChange={changeRequestPageSize} />
+              {activeView === 'tools' ? (
+                <SystemToolsView
+                  runtime={data.runtime}
+                  drainUpdating={drainUpdating}
+                  onToggleDraining={(draining) => void setDraining(draining)}
+                  onUploaded={() => void load({ silent: true, requestPage: 1, imagePage: 1 })}
+                />
+              ) : null}
             </>
           ) : (
-            <>
-              <AsyncOverviewPanel overview={data.async} />
-              <AsyncTaskTable
-                page={data.asyncTasks}
-                enabled={data.async.enabled}
-                traceId={asyncTaskTraceId}
-                onTraceSearch={searchAsyncTasks}
-                onPageChange={changeAsyncTaskPage}
-                onPageSizeChange={changeAsyncTaskPageSize}
-              />
-              <CallbackTable page={data.callbacks} enabled={data.async.enabled} onPageChange={changeCallbackPage} onPageSizeChange={changeCallbackPageSize} />
-            </>
+            <div className="panel empty-panel">
+              <Loader2 className="spin" size={24} />
+              <span>正在加载数据</span>
+            </div>
           )}
-        </>
-      ) : (
-        <div className="panel empty-panel">
-          <Loader2 className="spin" size={24} />
-          <span>正在加载数据</span>
         </div>
-      )}
+      </div>
     </main>
+  );
+}
+
+function DashboardNavButton({ active, icon, label, badge, onClick }: {
+  active: boolean;
+  icon: React.ReactNode;
+  label: string;
+  badge?: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      className={active ? 'active' : ''}
+      aria-current={active ? 'page' : undefined}
+      onClick={onClick}
+    >
+      {icon}
+      <span>{label}</span>
+      {badge ? <span className="nav-badge">{badge}</span> : null}
+    </button>
+  );
+}
+
+function OperationsOverview({ data, memoryPercent, asyncBacklog, onNavigate }: {
+  data: DashboardData;
+  memoryPercent: number;
+  asyncBacklog: number;
+  onNavigate: (view: DashboardView) => void;
+}) {
+  const workersUnavailable = data.async.enabled && data.async.workers.total === 0;
+  const asyncFailures = data.async.tasks.failed + data.async.callbacks.failed;
+  const healthy = !data.runtime.draining && memoryPercent < 90 && !workersUnavailable;
+
+  return (
+    <>
+      <section className="status-grid overview-status-grid" aria-label="运行状态摘要">
+        <StatusTile
+          icon={<Server size={19} />}
+          label="系统状态"
+          value={healthy ? '运行正常' : '需要关注'}
+          tone={healthy ? 'success' : 'warning'}
+          detail={data.runtime.draining ? '同步接口处于排空模式' : '同步与异步服务已连接'}
+        />
+        <StatusTile
+          icon={<Activity size={19} />}
+          label="同步处理中"
+          value={formatNumber(data.runtime.activeGenerations)}
+          detail={`生成等待 ${formatNumber(data.runtime.queuedGenerations)} · 图片处理 ${formatNumber(data.runtime.activeImageProcessing)}`}
+        />
+        <StatusTile
+          icon={<Send size={19} />}
+          label="异步积压"
+          value={formatNumber(asyncBacklog)}
+          tone={asyncBacklog > 0 ? 'warning' : 'success'}
+          detail={`排队 ${formatNumber(data.async.tasks.queued)} · 处理中 ${formatNumber(data.async.tasks.processing)}`}
+        />
+        <StatusTile
+          icon={<Cpu size={19} />}
+          label="在线节点"
+          value={data.async.enabled ? formatNumber(data.async.workers.total) : '-'}
+          tone={workersUnavailable ? 'warning' : 'default'}
+          detail={data.async.enabled
+            ? `${formatNumber(data.async.workers.instances_total)} 个实例 · 容量 ${formatNumber(data.async.workers.effective_capacity)}`
+            : '异步任务未启用'}
+        />
+      </section>
+
+      <section className="panel overview-panel">
+        <div className="panel-heading">
+          <div>
+            <h2>运行信号</h2>
+            <p>优先展示需要处理的状态，正常指标保持安静。</p>
+          </div>
+          <span className={`status-pill ${healthy ? 'ok' : 'warning'}`}>
+            {healthy ? <CheckCircle2 size={13} /> : <AlertTriangle size={13} />}
+            {healthy ? '暂无异常' : '存在提醒'}
+          </span>
+        </div>
+        <div className="overview-signal-list">
+          <div className="overview-signal">
+            {data.runtime.draining ? <CirclePause size={17} /> : <CheckCircle2 size={17} />}
+            <span>
+              <strong>{data.runtime.draining ? '同步接口正在排空' : '同步接口可接收请求'}</strong>
+              <small>{data.runtime.safeToRestart ? '当前可安全重启' : `活跃生成 ${formatNumber(data.runtime.activeGenerations)}`}</small>
+            </span>
+          </div>
+          <div className="overview-signal">
+            {workersUnavailable ? <AlertTriangle size={17} /> : <CheckCircle2 size={17} />}
+            <span>
+              <strong>{workersUnavailable ? '异步任务没有在线节点' : '异步节点心跳正常'}</strong>
+              <small>{data.async.enabled
+                ? `${formatNumber(data.async.workers.total)} 个节点，${formatNumber(data.async.workers.active_tasks)} 个任务执行中`
+                : '异步任务未启用'}</small>
+            </span>
+          </div>
+          <div className="overview-signal history">
+            <BarChart3 size={17} />
+            <span>
+              <strong>{asyncFailures > 0 ? `累计终态失败 ${formatNumber(asyncFailures)}` : '累计记录无终态失败'}</strong>
+              <small>历史累计：任务失败 {formatNumber(data.async.tasks.failed)} · 回调失败 {formatNumber(data.async.callbacks.failed)}</small>
+            </span>
+          </div>
+        </div>
+      </section>
+
+      <section className="overview-domain-grid" aria-label="业务入口">
+        <button type="button" className="overview-domain" onClick={() => onNavigate('sync')}>
+          <span className="overview-domain-icon"><Activity size={18} /></span>
+          <span>
+            <strong>同步接口</strong>
+            <small>并发、耗时、错误与请求审计</small>
+          </span>
+          <span className="overview-domain-action">打开</span>
+        </button>
+        <button type="button" className="overview-domain" onClick={() => onNavigate('async')}>
+          <span className="overview-domain-icon"><Send size={18} /></span>
+          <span>
+            <strong>异步任务</strong>
+            <small>队列、节点、任务与回调投递</small>
+          </span>
+          <span className="overview-domain-action">打开</span>
+        </button>
+      </section>
+    </>
+  );
+}
+
+function SyncDashboardView({ data, memoryPercent, processingPercent, r2UploadError, onErrorPageChange, onRequestPageChange, onRequestPageSizeChange }: {
+  data: DashboardData;
+  memoryPercent: number;
+  processingPercent: number;
+  r2UploadError?: ErrorRecord;
+  onErrorPageChange: (page: number) => void;
+  onRequestPageChange: (page: number) => void;
+  onRequestPageSizeChange: (pageSize: number) => void;
+}) {
+  return (
+    <>
+      <section className="status-grid">
+        <StatusTile
+          icon={<Server size={19} />}
+          label="服务状态"
+          value={data.runtime.draining ? '排空中' : memoryPercent >= 90 ? '内存高水位' : '运行正常'}
+          tone={data.runtime.draining ? 'warning' : memoryPercent >= 90 ? 'warning' : 'success'}
+          detail={data.runtime.safeToRestart ? '可安全重启' : `RSS ${formatBytes(data.runtime.memory.rssBytes)} / ${formatBytes(data.runtime.memory.maxRssBytes)}`}
+        />
+        <StatusTile
+          icon={<Activity size={19} />}
+          label="生成并发"
+          value={`${data.runtime.activeGenerations}/${data.runtime.maxConcurrentGenerations}`}
+          detail={`等待队列 ${data.runtime.queuedGenerations}`}
+        />
+        <StatusTile
+          icon={<UploadCloud size={19} />}
+          label="图片处理"
+          value={`${data.runtime.activeImageProcessing}/${data.runtime.maxConcurrentImageProcessing}`}
+          tone={processingPercent >= 80 ? 'warning' : 'default'}
+          detail={`等待队列 ${data.runtime.queuedImageProcessing}`}
+        />
+        <StatusTile
+          icon={<MemoryStick size={19} />}
+          label="内存使用"
+          value={`${memoryPercent.toFixed(1)}%`}
+          tone={memoryPercent >= 90 ? 'danger' : memoryPercent >= 75 ? 'warning' : 'default'}
+          detail={`Heap ${formatBytes(data.runtime.memory.heapUsedBytes)} · R2 ${r2UploadError ? '存在失败' : '正常'}`}
+        />
+      </section>
+
+      <section className="metric-grid" aria-label="同步接口指标">
+        <MetricCard title="总请求" value={formatNumber(data.summary.total)} icon={<BarChart3 size={18} />} />
+        <MetricCard title="成功率" value={`${(data.summary.successRate * 100).toFixed(1)}%`} icon={<CheckCircle2 size={18} />} />
+        <MetricCard title="平均耗时" value={formatMs(data.summary.avgTotalMs)} icon={<Clock3 size={18} />} />
+        <MetricCard title="P95 总耗时" value={formatMs(data.summary.p95TotalMs)} icon={<Clock3 size={18} />} />
+        <MetricCard title="P95 上游" value={formatMs(data.summary.p95OpenaiMs)} icon={<Server size={18} />} />
+        <MetricCard title="P95 上传" value={formatMs(data.summary.p95UploadMs)} icon={<UploadCloud size={18} />} />
+        <MetricCard title="平均图片" value={formatBytes(data.summary.avgImageBytes)} icon={<ImageIcon size={18} />} />
+        <MetricCard title="累计上传" value={formatBytes(data.summary.uploadedBytes)} icon={<Database size={18} />} />
+      </section>
+
+      <RequestTrendChart summary={data.summary} />
+      <ErrorPanel errors={data.errors} onPageChange={onErrorPageChange} />
+      <RequestTable
+        page={data.requests}
+        onPageChange={onRequestPageChange}
+        onPageSizeChange={onRequestPageSizeChange}
+      />
+    </>
+  );
+}
+
+function SystemToolsView({ runtime, drainUpdating, onToggleDraining, onUploaded }: {
+  runtime: RuntimeStats;
+  drainUpdating: boolean;
+  onToggleDraining: (draining: boolean) => void;
+  onUploaded: () => void;
+}) {
+  return (
+    <div className="tools-stack">
+      <section className={`maintenance-panel ${runtime.draining ? 'draining' : ''}`}>
+        <div className="maintenance-copy">
+          <div className="maintenance-icon">
+            <CirclePause size={20} />
+          </div>
+          <div>
+            <p className="eyebrow">服务维护</p>
+            <h2>{runtime.draining ? '排空模式已开启' : '排空模式未开启'}</h2>
+            <p>
+              {runtime.draining
+                ? runtime.safeToRestart
+                  ? '当前没有活跃生成或处理队列，可以安全重启或升级。'
+                  : '新图片请求已拒绝，已有请求会继续处理，等待队列清空后再重启。'
+                : '开启后会拒绝新的文生图/图生图请求，已有请求继续完成。'}
+            </p>
+          </div>
+        </div>
+        <button
+          className={runtime.draining ? 'ghost-button' : 'danger-button'}
+          disabled={drainUpdating}
+          onClick={() => onToggleDraining(!runtime.draining)}
+        >
+          {drainUpdating ? <Loader2 className="spin" size={17} /> : <CirclePause size={17} />}
+          {runtime.draining ? '退出排空模式' : '进入排空模式'}
+        </button>
+      </section>
+      <AdminUploadPanel onUploaded={onUploaded} />
+    </div>
   );
 }
 
@@ -1048,101 +1344,138 @@ function AsyncOverviewPanel({ overview }: { overview: AsyncOverview }) {
 }
 
 function WorkerPanel({ workers, enabled }: { workers: WorkerSummary; enabled: boolean }) {
+  const showTaskTable = () => {
+    document.getElementById('async-task-table')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
+
   return (
     <section className="worker-panel" aria-label="运行节点">
-      <div className="worker-summary-grid">
-        <StatusTile
-          icon={<Cpu size={19} />}
-          label="在线 Worker"
-          value={enabled ? formatNumber(workers.total) : '-'}
-          tone={enabled && workers.total === 0 ? 'warning' : 'default'}
-          detail={enabled ? `活跃任务 ${formatNumber(workers.active_tasks)}` : '任务队列未启用'}
-        />
-        <StatusTile
-          icon={<Activity size={19} />}
-          label="图片处理总并发"
-          value={enabled ? formatNumber(workers.image_processing_concurrency) : '-'}
-          detail={`BullMQ 并发 ${enabled ? formatNumber(workers.worker_concurrency) : '-'}`}
-        />
-        <StatusTile
-          icon={<CheckCircle2 size={19} />}
-          label="节点启动后成功"
-          value={enabled ? formatNumber(workers.completed_since_start) : '-'}
-          tone="success"
-          detail="在线节点累计"
-        />
-        <StatusTile
-          icon={<XCircle size={19} />}
-          label="节点启动后失败"
-          value={enabled ? formatNumber(workers.failed_since_start) : '-'}
-          tone={workers.failed_since_start > 0 ? 'warning' : 'default'}
-          detail="在线节点累计"
-        />
-      </div>
-
       <div className="worker-section">
         <div className="worker-section-heading">
           <div>
             <h3>运行节点</h3>
-            <p>按 Redis 心跳展示在线 worker、IP、当前任务和节点内存。</p>
+            <p>按 Redis 心跳聚合节点；容器诊断默认折叠，每个节点最多预览 3 个任务。</p>
           </div>
-          <span>{enabled ? `${formatNumber(workers.total)} 个在线` : '未启用'}</span>
+          <span>{enabled ? `${formatNumber(workers.total)} 个节点在线` : '未启用'}</span>
         </div>
+
+        <dl className="worker-rollup">
+          <div>
+            <dt>实例</dt>
+            <dd>{enabled ? formatNumber(workers.instances_total) : '-'}</dd>
+          </div>
+          <div>
+            <dt>有效容量</dt>
+            <dd>{enabled ? formatNumber(workers.effective_capacity) : '-'}</dd>
+          </div>
+          <div>
+            <dt>执行中</dt>
+            <dd>{enabled ? formatNumber(workers.active_tasks) : '-'}</dd>
+          </div>
+          <div>
+            <dt>成功 / 失败</dt>
+            <dd>{enabled ? `${formatNumber(workers.completed_since_start)} / ${formatNumber(workers.failed_since_start)}` : '-'}</dd>
+          </div>
+        </dl>
 
         <div className="worker-list">
           {!enabled ? (
             <div className="empty-state"><CirclePause size={18} />任务队列未启用</div>
           ) : workers.data.length === 0 ? (
             <div className="empty-state"><AlertTriangle size={18} />暂无在线 worker 心跳</div>
-          ) : workers.data.map((worker) => (
-            <article className="worker-card" key={worker.worker_id}>
-              <div className="worker-card-header">
-                <div className="worker-title">
-                  <strong>{worker.hostname}</strong>
-                  <span>IP {formatWorkerIps(worker.ip_addresses)}</span>
-                  <span>PID {worker.pid} · {shortId(worker.worker_id)}</span>
-                </div>
-                <span className="status-pill ok">在线</span>
-              </div>
-              <dl className="worker-stats">
-                <div>
-                  <dt>活跃</dt>
-                  <dd>{worker.active_tasks}</dd>
-                </div>
-                <div>
-                  <dt>图片处理并发</dt>
-                  <dd>{worker.image_processing_concurrency}</dd>
-                </div>
-                <div>
-                  <dt>成功/失败</dt>
-                  <dd>{worker.completed_since_start}/{worker.failed_since_start}</dd>
-                </div>
-                <div>
-                  <dt>RSS</dt>
-                  <dd>{formatBytes(worker.rss_bytes)}</dd>
-                </div>
-              </dl>
-              <div className="worker-meta">
-                <span>启动 {formatRelativeDuration(worker.started_at)}</span>
-                <span>心跳 {formatRelativeDuration(worker.last_seen_at)}</span>
-                {worker.last_error_code ? <span>最后错误 {worker.last_error_code}</span> : null}
-              </div>
-              {worker.current_tasks.length > 0 ? (
-                <div className="worker-task-list">
-                  {worker.current_tasks.map((task) => (
-                    <div className="worker-task" key={task.provider_task_id}>
-                      <span className="id-cell">{task.client_task_id}</span>
-                      <span>{asyncOperationLabel(task.operation)}</span>
-                      <span>{task.model}</span>
-                      <span>{formatRelativeDuration(task.started_at)}</span>
+          ) : workers.data.map((worker) => {
+            const visibleTasks = worker.current_tasks.slice(0, 3);
+            const hiddenTaskCount = Math.max(0, worker.active_tasks - visibleTasks.length);
+            return (
+              <article className="worker-node" key={worker.node_id}>
+                <div className="worker-node-header">
+                  <div className="worker-identity">
+                    <span className={`health-dot ${worker.identity_conflict ? 'bad' : 'ok'}`} />
+                    <div className="worker-title">
+                      <strong>{worker.node_id}</strong>
+                      <span className="worker-advertised-ip">实际 IP {worker.advertised_ip}</span>
+                      <span>{worker.queue_name} · {worker.instance_count} 个实例</span>
                     </div>
-                  ))}
+                  </div>
+                  <span className={`status-pill ${worker.identity_conflict ? 'warning' : 'ok'}`}>
+                    {worker.identity_conflict ? '身份冲突' : '在线'}
+                  </span>
                 </div>
-              ) : (
-                <div className="worker-idle">当前无任务</div>
-              )}
-            </article>
-          ))}
+
+                <dl className="worker-stats">
+                  <div>
+                    <dt>当前任务</dt>
+                    <dd>{worker.active_tasks}</dd>
+                  </div>
+                  <div>
+                    <dt>有效容量</dt>
+                    <dd>{worker.effective_capacity}</dd>
+                  </div>
+                  <div>
+                    <dt>成功 / 失败</dt>
+                    <dd>{worker.completed_since_start} / {worker.failed_since_start}</dd>
+                  </div>
+                  <div>
+                    <dt>内存</dt>
+                    <dd>{formatBytes(worker.rss_bytes)}</dd>
+                  </div>
+                </dl>
+
+                <div className="worker-meta">
+                  <span>启动 {formatRelativeDuration(worker.started_at)}</span>
+                  <span>心跳 {formatRelativeDuration(worker.last_seen_at)}</span>
+                  <span>容器 IP {formatWorkerIps(worker.ip_addresses)}</span>
+                  {worker.last_error_code ? <span>最后错误 {worker.last_error_code}</span> : null}
+                </div>
+
+                {worker.active_tasks > 0 ? (
+                  <div className="worker-task-area">
+                    <div className="worker-task-heading">
+                      <strong>执行中</strong>
+                      <span>最近开始的 {visibleTasks.length} 个</span>
+                    </div>
+                    <div className="worker-task-list">
+                      {visibleTasks.map((task) => (
+                        <div className="worker-task" key={task.provider_task_id}>
+                          <span className="id-cell" title={task.client_task_id}>{task.client_task_id}</span>
+                          <span>{asyncOperationLabel(task.operation)}</span>
+                          <span title={task.model}>{task.model}</span>
+                          <span>{formatRelativeDuration(task.started_at)}</span>
+                        </div>
+                      ))}
+                    </div>
+                    {hiddenTaskCount > 0 ? (
+                      <div className="worker-task-overflow">
+                        <Layers3 size={16} />
+                        <span>另有 <strong>{formatNumber(hiddenTaskCount)}</strong> 个任务正在运行</span>
+                        <button type="button" className="mini-action-button" onClick={showTaskTable}>查看任务列表</button>
+                      </div>
+                    ) : null}
+                  </div>
+                ) : (
+                  <div className="worker-idle">当前无任务</div>
+                )}
+
+                <details className="worker-instance-details">
+                  <summary>
+                    <Cpu size={16} />
+                    {worker.instance_count} 个实例 · 容器诊断信息
+                  </summary>
+                  <div className="worker-instance-list" aria-label={`${worker.node_id} 实例`}>
+                    {worker.instances.map((instance) => (
+                      <div className="worker-instance" key={instance.worker_id}>
+                        <span title={instance.hostname}>{instance.hostname}</span>
+                        <span>PID {instance.pid}</span>
+                        <span title={formatWorkerIps(instance.ip_addresses)}>容器 IP {formatWorkerIps(instance.ip_addresses)}</span>
+                        <span>RSS {formatBytes(instance.rss_bytes)}</span>
+                        <span>{shortId(instance.worker_id)}</span>
+                      </div>
+                    ))}
+                  </div>
+                </details>
+              </article>
+            );
+          })}
         </div>
       </div>
     </section>
@@ -1211,7 +1544,7 @@ function AsyncTaskTable({ page, enabled, traceId, onTraceSearch, onPageChange, o
   }, [traceId]);
 
   return (
-    <section className="panel table-panel">
+    <section className="panel table-panel" id="async-task-table">
       <div className="panel-heading async-task-heading">
         <div>
           <h2>图片任务</h2>
@@ -1258,6 +1591,7 @@ function AsyncTaskTable({ page, enabled, traceId, onTraceSearch, onPageChange, o
             <tr>
               <th>创建时间</th>
               <th>状态</th>
+              <th>执行节点</th>
               <th>Request ID</th>
               <th>new-api 任务</th>
               <th>内部任务</th>
@@ -1279,16 +1613,17 @@ function AsyncTaskTable({ page, enabled, traceId, onTraceSearch, onPageChange, o
           <tbody>
             {!enabled ? (
               <tr>
-                <td colSpan={18} className="table-empty">任务队列管理未启用</td>
+                <td colSpan={19} className="table-empty">任务队列管理未启用</td>
               </tr>
             ) : page.data.length === 0 ? (
               <tr>
-                <td colSpan={18} className="table-empty">暂无图片任务</td>
+                <td colSpan={19} className="table-empty">暂无图片任务</td>
               </tr>
             ) : page.data.map((task) => (
               <tr key={task.provider_task_id}>
                 <td>{formatDate(task.created_at)}</td>
                 <td><AsyncStatusPill status={task.status} /></td>
+                <td title={`assignment v${task.assignment_version}`}>{task.assigned_node_id ?? '-'}</td>
                 <TraceIdCell value={task.request_id} />
                 <TraceIdCell value={task.client_task_id} />
                 <TraceIdCell value={task.provider_task_id} />

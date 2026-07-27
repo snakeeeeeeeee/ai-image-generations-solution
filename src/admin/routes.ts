@@ -8,10 +8,13 @@ import type { AdminStore } from './store.js';
 import type { AdminConfig, AdminRuntimeStats } from './types.js';
 import { AppError, sendAppError } from '../errors.js';
 import type { AsyncTaskStore } from '../async/store.js';
-import type { Queue } from 'bullmq';
-import type { TaskQueuePayload } from '../async/types.js';
 import type { Redis } from 'ioredis';
-import { readWorkerHeartbeats, type WorkerHeartbeat } from '../async/worker-heartbeat.js';
+import type { ImageTaskQueueRegistry } from '../async/queue.js';
+import {
+  aggregateWorkerNodes,
+  readWorkerHeartbeats,
+  type WorkerNodeHeartbeat
+} from '../async/worker-heartbeat.js';
 
 interface AdminRoutesOptions {
   config: AdminConfig;
@@ -20,7 +23,7 @@ interface AdminRoutesOptions {
   maxUploadBytes: number;
   uploadImage?: AdminUploadHandler;
   asyncTaskStore?: AsyncTaskStore;
-  taskQueue?: Queue<TaskQueuePayload>;
+  taskQueues?: ImageTaskQueueRegistry;
   asyncRedisConnection?: Redis;
 }
 
@@ -221,12 +224,16 @@ export function registerAdminRoutes(app: FastifyInstance, options: AdminRoutesOp
       });
     }
 
-    const [tasks, callbacks, queue, workers] = await Promise.all([
+    const [tasks, callbacks, workers, knownNodeIds] = await Promise.all([
       options.asyncTaskStore.getAdminTaskSummary(),
       options.asyncTaskStore.getAdminCallbackSummary(),
-      getQueueStats(options.taskQueue),
-      getWorkerSummary(options.asyncRedisConnection)
+      getWorkerSummary(options.asyncRedisConnection),
+      options.asyncTaskStore.getKnownNodeIds()
     ]);
+    const queue = await getQueueStats(
+      options.taskQueues,
+      [...new Set([...knownNodeIds, ...workers.data.map((worker) => worker.node_id)])].sort()
+    );
 
     return {
       enabled: true,
@@ -271,19 +278,43 @@ export function registerAdminRoutes(app: FastifyInstance, options: AdminRoutesOp
   }, async (_request, reply) => sendAdminShell(reply, adminDist));
 }
 
-async function getQueueStats(queue: Queue<TaskQueuePayload> | undefined): Promise<Record<string, number> | null> {
-  if (!queue) {
+async function getQueueStats(
+  queues: ImageTaskQueueRegistry | undefined,
+  nodeIds: string[]
+): Promise<Record<string, unknown> | null> {
+  if (!queues) {
     return null;
   }
-  const counts = await queue.getJobCounts('waiting', 'active', 'delayed', 'completed', 'failed', 'paused');
+  const nodes = await Promise.all(nodeIds.map(async (nodeId) => {
+    const queue = queues.get(nodeId);
+    const counts = await queue.getJobCounts('waiting', 'active', 'delayed', 'completed', 'failed', 'paused');
+    return {
+      node_id: nodeId,
+      queue_name: queue.name,
+      waiting: counts.waiting ?? 0,
+      active: counts.active ?? 0,
+      delayed: counts.delayed ?? 0,
+      completed: counts.completed ?? 0,
+      failed: counts.failed ?? 0,
+      paused: counts.paused ?? 0
+    };
+  }));
   return {
-    waiting: counts.waiting ?? 0,
-    active: counts.active ?? 0,
-    delayed: counts.delayed ?? 0,
-    completed: counts.completed ?? 0,
-    failed: counts.failed ?? 0,
-    paused: counts.paused ?? 0
+    waiting: sumQueueMetric(nodes, 'waiting'),
+    active: sumQueueMetric(nodes, 'active'),
+    delayed: sumQueueMetric(nodes, 'delayed'),
+    completed: sumQueueMetric(nodes, 'completed'),
+    failed: sumQueueMetric(nodes, 'failed'),
+    paused: sumQueueMetric(nodes, 'paused'),
+    nodes
   };
+}
+
+function sumQueueMetric(
+  nodes: Array<Record<'waiting' | 'active' | 'delayed' | 'completed' | 'failed' | 'paused', number>>,
+  key: 'waiting' | 'active' | 'delayed' | 'completed' | 'failed' | 'paused'
+): number {
+  return nodes.reduce((total, node) => total + node[key], 0);
 }
 
 function emptyTaskSummary() {
@@ -310,12 +341,14 @@ function emptyCallbackSummary() {
 function emptyWorkerSummary() {
   return {
     total: 0,
+    instances_total: 0,
     active_tasks: 0,
+    effective_capacity: 0,
     worker_concurrency: 0,
     image_processing_concurrency: 0,
     completed_since_start: 0,
     failed_since_start: 0,
-    data: [] as WorkerHeartbeat[]
+    data: [] as WorkerNodeHeartbeat[]
   };
 }
 
@@ -324,10 +357,12 @@ async function getWorkerSummary(redis: Redis | undefined) {
     return emptyWorkerSummary();
   }
 
-  const workers = await readWorkerHeartbeats(redis);
+  const workers = aggregateWorkerNodes(await readWorkerHeartbeats(redis));
   return {
     total: workers.length,
+    instances_total: workers.reduce((total, worker) => total + worker.instance_count, 0),
     active_tasks: workers.reduce((total, worker) => total + worker.active_tasks, 0),
+    effective_capacity: workers.reduce((total, worker) => total + worker.effective_capacity, 0),
     worker_concurrency: workers.reduce((total, worker) => total + worker.worker_concurrency, 0),
     image_processing_concurrency: workers.reduce((total, worker) => total + worker.image_processing_concurrency, 0),
     completed_since_start: workers.reduce((total, worker) => total + worker.completed_since_start, 0),

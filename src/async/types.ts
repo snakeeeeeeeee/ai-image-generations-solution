@@ -61,6 +61,8 @@ export interface AsyncTaskRecord {
   usage: Record<string, unknown> | null;
   error: AsyncTaskError | null;
   attempts: number;
+  assigned_node_id?: string;
+  assignment_version: number;
   created_at: string;
   started_at?: string;
   finished_at?: string;
@@ -81,6 +83,8 @@ export interface AsyncTaskError {
 
 export interface TaskQueuePayload {
   provider_task_id: string;
+  node_id: string;
+  assignment_version: number;
 }
 
 export interface CallbackEventRecord {

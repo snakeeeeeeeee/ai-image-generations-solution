@@ -37,10 +37,14 @@ try {
   }
 
   if (shouldRunWorker && asyncStore && queueClients) {
+    const nodeId = config.asyncTasks.workerNodeId;
+    if (!nodeId) {
+      throw new Error('WORKER_NODE_ID is required for async worker');
+    }
     workerRuntime = startAsyncWorker({
       config,
       store: asyncStore,
-      taskQueue: queueClients.taskQueue
+      taskQueue: queueClients.taskQueues.get(nodeId)
     });
   }
 

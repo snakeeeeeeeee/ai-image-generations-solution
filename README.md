@@ -67,6 +67,8 @@ POSTGRES_URL=postgres://image_handle:image_handle@image-handle-postgres:5432/ima
 REDIS_URL=redis://image-handle-redis:6379
 PROVIDER_API_KEYS=provider-test-key
 UPSTREAM_API_KEY=
+WORKER_NODE_ID=main
+WORKER_ADVERTISED_IP=203.0.113.10
 WORKER_CONCURRENCY=20
 IMAGE_PROCESSING_CONCURRENCY=10
 GLOBAL_RATE_LIMIT_IPM=250
@@ -240,7 +242,7 @@ curl http://127.0.0.1:8787/v1/image/tasks/query \
   -d '{"task_ids":["imgtask_xxx"]}'
 ```
 
-异步任务的事实库是 PostgreSQL。Redis 用于 BullMQ 队列、分布式限速、重试和短期协调。异步 worker 不维护长期上游密钥，而是通过 `executor.resolve_url` 向 new-api 领取短期 credential lease，再直连 OpenAI-compatible 上游执行并上传 R2。
+异步任务的事实库是 PostgreSQL。API 根据在线 Redis 心跳和 PostgreSQL 中的节点积压，把任务分配到 `image-tasks-<WORKER_NODE_ID>` 节点队列；Redis 还用于分布式限速、重试和短期协调。节点负载按 `(queued + processing) / 有效容量` 比较，有效容量为该节点所有实例 `min(WORKER_CONCURRENCY, IMAGE_PROCESSING_CONCURRENCY)` 之和，负载相同时按最久未分配顺序轮转。异步 worker 不维护长期上游密钥，而是通过 `executor.resolve_url` 向 new-api 领取短期 credential lease，再直连 OpenAI-compatible 上游执行并上传 R2。
 
 ## Docker Compose 部署
 
@@ -281,6 +283,7 @@ cd deploy
 
 ```bash
 cd deploy
+# .env 中设置 WORKER_NODE_ID=worker-01 和该机器的 WORKER_ADVERTISED_IP
 ./image-handle.sh --env worker start all
 ```
 
@@ -291,7 +294,7 @@ cd deploy
 ./image-handle.sh --env prod start async --scale image-worker=5 --scale image-notifier=2
 ```
 
-多机生产环境下，所有业务节点必须使用同一套 `POSTGRES_URL`、`REDIS_URL`、R2 配置和上游配置。PostgreSQL/Redis 可以由生产主节点的 `./image-handle.sh --env prod start infra` 部署，也可以使用独立数据库服务；不要在每台处理机器上各自启动一套 PostgreSQL 或 Redis。部署文件统一放在 `deploy/` 目录。`docker-compose.dev.yml` 用于本地/源码构建；`docker-compose.prod.yml` 和 `docker-compose.worker.yml` 用于生产镜像部署。
+多机生产环境下，所有业务节点必须使用同一套 `POSTGRES_URL`、`REDIS_URL`、R2 配置和上游配置。每台物理机必须配置唯一、稳定的 `WORKER_NODE_ID` 和显式的 `WORKER_ADVERTISED_IP`；同一物理机扩容多个 worker 进程时共享同一个节点 ID。PostgreSQL/Redis 可以由生产主节点的 `./image-handle.sh --env prod start infra` 部署，也可以使用独立数据库服务；不要在每台处理机器上各自启动一套 PostgreSQL 或 Redis。部署文件统一放在 `deploy/` 目录。`docker-compose.dev.yml` 用于本地/源码构建；`docker-compose.prod.yml` 和 `docker-compose.worker.yml` 用于生产镜像部署。
 
 端口也都通过 `deploy/.env` 配置。`PORT` 是 image-api 容器内监听端口，`IMAGE_API_HOST_PORT` 是映射到宿主机的端口。开发环境还可以配置 `POSTGRES_HOST_PORT`、`REDIS_HOST_PORT`、`MOCK_NEW_API_HOST_PORT`，用于避免和本机其他服务冲突。
 

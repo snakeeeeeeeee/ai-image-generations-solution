@@ -20,10 +20,17 @@ const fakeAsyncStore = {
 const fakeQueueClients = {
   connection: {
     get: async () => null,
+    scan: async () => ['0', []],
+    mget: async () => [],
     disconnect: () => undefined
   },
-  taskQueue: {
-    add: async () => undefined,
+  taskQueues: {
+    get: () => ({
+      name: 'image-tasks-test-node',
+      getJob: async () => undefined,
+      add: async () => undefined,
+      getJobCounts: async () => ({})
+    }),
     close: async () => undefined
   }
 };

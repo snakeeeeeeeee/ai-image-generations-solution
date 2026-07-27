@@ -8,6 +8,7 @@ import type { AdminRuntimeStats, ImageRequestRecord } from './admin/types.js';
 import { registerAsyncTaskRoutes } from './async/routes.js';
 import { AsyncTaskStore } from './async/store.js';
 import { createQueueClients, closeQueueClients, type QueueClients } from './async/queue.js';
+import { TaskScheduler, type TaskSchedulerLike } from './async/scheduler.js';
 import { registerImageUploadRoutes } from './async/uploads.js';
 import type { AppConfig } from './config.js';
 import { AppError, openAIError, sendAppError } from './errors.js';
@@ -84,6 +85,10 @@ interface ServerDeps {
   adminStore?: AdminStore;
   asyncTaskStore?: AsyncTaskStore;
   queueClients?: QueueClients;
+  taskScheduler?: TaskSchedulerLike & {
+    start?: () => void;
+    close?: () => Promise<void>;
+  };
 }
 
 function runtimeStats(
@@ -778,6 +783,16 @@ export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyIn
     bodyLimit: config.bodyLimitBytes,
     requestIdHeader: 'x-request-id'
   });
+  const taskScheduler = deps.taskScheduler ?? (
+    asyncStore && queueClients
+      ? new TaskScheduler(config, asyncStore, queueClients.connection, queueClients.taskQueues, {
+          info: (details, message) => app.log.info(details, message),
+          warn: (details, message) => app.log.warn(details, message),
+          error: (details, message) => app.log.error(details, message)
+        })
+      : undefined
+  );
+  taskScheduler?.start?.();
   app.register(multipart, {
     limits: {
       fileSize: config.bodyLimitBytes,
@@ -796,6 +811,7 @@ export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyIn
 
   app.addHook('onClose', async () => {
     clearInterval(cleanupInterval);
+    await taskScheduler?.close?.();
     await upstreamDispatcher.close();
     if (!deps.queueClients && queueClients) {
       await closeQueueClients(queueClients);
@@ -843,15 +859,15 @@ export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyIn
     maxUploadBytes: config.bodyLimitBytes,
     uploadImage: (file, request) => handleAdminImageUpload(file, request),
     asyncTaskStore: asyncStore,
-    taskQueue: queueClients?.taskQueue,
+    taskQueues: queueClients?.taskQueues,
     asyncRedisConnection: queueClients?.connection
   });
 
-  if (asyncStore && queueClients) {
+  if (asyncStore && queueClients && taskScheduler) {
     registerAsyncTaskRoutes(app, {
       config,
       store: asyncStore,
-      taskQueue: queueClients.taskQueue,
+      scheduler: taskScheduler,
       base64ResultRedis: queueClients.connection
     });
     registerImageUploadRoutes(app, {

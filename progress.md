@@ -1,5 +1,22 @@
 # Progress
 
+- 2026-07-27: Started Phase 13 implementation for load-aware per-node scheduling, stale-assignment safety, automatic failover, and worker/task node observability.
+- 2026-07-27: Confirmed the repository is clean and the supplied implementation plan is the validated design; recorded its locked decisions before code changes.
+- 2026-07-27: Inspected the initial configuration, queue, worker, heartbeat, route, and store surfaces; confirmed the current recovery and queue ownership are worker-global and need assignment-aware separation.
+- 2026-07-27: Added worker identity validation, per-node queue naming, assignment/version schema and mutations, PostgreSQL-locked least-load scheduling, API reconciliation, assignment-safe worker execution, and node-local recovery.
+- 2026-07-27: Applied the existing data-dense admin design system to node aggregates: node ID and advertised IP are primary, while container hostname/PID/IP remain available per instance; the task table now includes the assigned node.
+- 2026-07-27: Completed populated desktop and 390px mobile browser QA with mocked admin data; node cards wrap without page overflow, the task table exposes its execution-node column through its existing horizontal scroller, and the browser console is clean.
+- 2026-07-27: Completed Phase 13 verification: `npm test` passed 78/78, `npm run build` passed, dev/prod/worker Compose configs validated, and `git diff --check` passed.
+- 2026-07-27: Started Phase 14 after approval of the operations-console prototype. Locked five primary views with explicit synchronous/asynchronous separation and a three-task node preview limit.
+- 2026-07-27: Replaced the React two-tab shell with five adaptive views, moved maintenance/upload into system tools, added overview health signals, capped node task previews, and passed the first admin production build.
+- 2026-07-27: Resumed Phase 14 styling and QA. Reconfirmed the approved operational-dashboard direction: synchronous and asynchronous workflows remain separate primary views, node task previews stay capped at three, and the remaining work is CSS/responsive/browser verification without backend contract changes.
+- 2026-07-27: Added the adaptive operations-console stylesheet: desktop sidebar, mobile five-destination top navigation, quieter metrics, overview signals, compact worker nodes, three-task overflow treatment, collapsed diagnostics, focus states, and reduced-motion support. `npm run build:admin` passes; Vite reports only the existing large-chunk advisory.
+- 2026-07-27: Started populated in-app browser QA against the local Vite server at `http://127.0.0.1:5173/image-wrapper/admin/`; live admin endpoints will be intercepted with non-secret fixture data.
+- 2026-07-27: Prepared origin-scoped browser interception for the seven read-only admin endpoints; the fixture includes separate sync metrics and async queue/node/task/callback data.
+- 2026-07-27: Replaced unreliable CDP interception with a disposable read-only QA server on port 5174. Static admin assets and populated sync/async fixture endpoints return 200; no repository or production data is used by that server.
+- 2026-07-27: Completed populated browser QA at 1440, 1024, 768, 390, and 375px. Verified all five views, sync/async separation, node ID/IP presentation, three-task overflow behavior, diagnostic expansion, local table scrolling, dark mode, reduced motion, task-table jump, touch sizes, and a clean browser console.
+- 2026-07-27: Corrected overview health semantics after confirming async failure summaries are lifetime totals: historical failures remain visible as cumulative information but no longer make current health permanently unhealthy.
+- 2026-07-27: Completed Phase 14 verification after the final UI cleanup: `npm test` passed 78/78, `npm run build` passed, `npm run build:admin` passed again, `git diff --check` is clean, and both disposable QA ports are stopped. Vite reports only the existing large-chunk advisory.
 - 2026-07-17: Started Phase 11 for semantic idempotency, provider_options persistence, URL download security, and shared-network integration with new-api.
 - 2026-07-17: Added normalized `provider_options`, stable semantic SHA-256 fingerprints, PostgreSQL fingerprint persistence, and 409 conflicts for mismatched duplicate `client_task_id` submissions.
 - 2026-07-17: Added DNS/IP-pinned image URL downloads with redirect/private-network controls, updated shared-network Docker dev profiles, and resumed with code tests passing while full new-api Docker E2E remains pending.

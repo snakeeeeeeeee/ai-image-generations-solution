@@ -3,11 +3,11 @@ import { Redis } from 'ioredis';
 import type { AppConfig } from '../config.js';
 import type { TaskQueuePayload } from './types.js';
 
-export const IMAGE_TASK_QUEUE = 'image-tasks';
+export const IMAGE_TASK_QUEUE_PREFIX = 'image-tasks-';
 
 export interface QueueClients {
   connection: Redis;
-  taskQueue: Queue<TaskQueuePayload>;
+  taskQueues: ImageTaskQueueRegistry;
 }
 
 export function createRedisConnection(redisUrl: string): Redis {
@@ -21,28 +21,70 @@ export function createQueueClients(config: AppConfig): QueueClients {
   const connection = createRedisConnection(config.asyncTasks.redisUrl);
   return {
     connection,
-    taskQueue: new Queue<TaskQueuePayload, void, string>(IMAGE_TASK_QUEUE, {
-      connection: {
-        url: config.asyncTasks.redisUrl
-      }
-    })
+    taskQueues: new ImageTaskQueueRegistry(config.asyncTasks.redisUrl)
   };
 }
 
 export async function closeQueueClients(clients: QueueClients): Promise<void> {
-  await clients.taskQueue.close();
+  await clients.taskQueues.close();
   clients.connection.disconnect();
+}
+
+export function imageTaskQueueName(nodeId: string): string {
+  return `${IMAGE_TASK_QUEUE_PREFIX}${nodeId}`;
+}
+
+export function imageTaskJobId(payload: TaskQueuePayload, attempts: number): string {
+  return `${payload.provider_task_id}-v${payload.assignment_version}-a${attempts}`;
+}
+
+export class ImageTaskQueueRegistry {
+  private readonly queues = new Map<string, Queue<TaskQueuePayload, void, string>>();
+
+  constructor(private readonly redisUrl: string) {}
+
+  get(nodeId: string): Queue<TaskQueuePayload, void, string> {
+    const existing = this.queues.get(nodeId);
+    if (existing) {
+      return existing;
+    }
+    const queue = new Queue<TaskQueuePayload, void, string>(imageTaskQueueName(nodeId), {
+      connection: {
+        url: this.redisUrl
+      }
+    });
+    this.queues.set(nodeId, queue);
+    return queue;
+  }
+
+  async close(): Promise<void> {
+    await Promise.all([...this.queues.values()].map((queue) => queue.close()));
+    this.queues.clear();
+  }
 }
 
 export async function enqueueImageTask(
   queue: Queue<TaskQueuePayload>,
-  providerTaskId: string,
+  payload: TaskQueuePayload,
+  attempts: number,
   options: JobsOptions = {}
 ): Promise<void> {
-  const { jobId = providerTaskId, ...restOptions } = options;
+  const { jobId = imageTaskJobId(payload, attempts), ...restOptions } = options;
+  const existing = await queue.getJob(jobId);
+  if (existing) {
+    const state = await existing.getState();
+    if (state === 'failed') {
+      await existing.retry();
+      return;
+    }
+    if (state !== 'completed') {
+      return;
+    }
+    await existing.remove();
+  }
   await queue.add(
     'image-task',
-    { provider_task_id: providerTaskId },
+    payload,
     {
       jobId,
       attempts: 1,
@@ -61,9 +103,10 @@ export async function enqueueImageTask(
 
 export function createImageTaskWorker(
   config: AppConfig,
+  nodeId: string,
   processor: Processor<TaskQueuePayload, void, string>
 ): Worker<TaskQueuePayload, void, string> {
-  return new Worker<TaskQueuePayload, void, string>(IMAGE_TASK_QUEUE, processor, {
+  return new Worker<TaskQueuePayload, void, string>(imageTaskQueueName(nodeId), processor, {
     connection: {
       url: config.asyncTasks.redisUrl
     },
