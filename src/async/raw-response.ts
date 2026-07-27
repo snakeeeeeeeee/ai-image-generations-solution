@@ -47,7 +47,11 @@ function sanitizeValue(value: unknown, path: string, omitted: Set<string>): unkn
   const result: Record<string, unknown> = {};
   for (const [key, item] of Object.entries(value)) {
     const itemPath = path ? `${path}.${key}` : key;
-    if (SENSITIVE_LARGE_KEYS.has(key) || (typeof item === 'string' && shouldOmitStringForKey(key, item))) {
+    if (
+      SENSITIVE_LARGE_KEYS.has(key) ||
+      (key === 'data' && isInlineDataPath(path) && typeof item === 'string') ||
+      (typeof item === 'string' && shouldOmitStringForKey(key, item))
+    ) {
       omitted.add(normalizePath(itemPath));
       result[key] = '[omitted]';
       continue;
@@ -55,6 +59,10 @@ function sanitizeValue(value: unknown, path: string, omitted: Set<string>): unkn
     result[key] = sanitizeValue(item, itemPath, omitted);
   }
   return result;
+}
+
+function isInlineDataPath(path: string): boolean {
+  return /(?:^|\.)(?:inlineData|inline_data)$/.test(path);
 }
 
 function shouldOmitString(value: string): boolean {

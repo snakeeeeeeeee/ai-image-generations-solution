@@ -1167,6 +1167,229 @@ test('worker resolves credential lease and passes through a signed URL without d
   await upstream.close();
 });
 
+test('worker executes Gemini lease with x-goog-api-key, normalized usage, R2 URL, and redacted raw response', async () => {
+  const upstream = Fastify();
+  let upstreamBaseUrl = '';
+  const received: {
+    apiKey?: string;
+    authorization?: string;
+    body?: unknown;
+    rateLimit?: { provider: string; model: string; channelId?: string };
+  } = {};
+
+  upstream.post('/api/internal/image/credential-leases/lease_gemini/resolve', async () => ({
+    provider: 'google_gemini',
+    request_format: 'gemini_generate_content',
+    base_url: upstreamBaseUrl,
+    endpoint_url:
+      `${upstreamBaseUrl}/v1beta/models/gemini-3.1-flash-image:generateContent`,
+    api_key: 'gemini-lease-secret',
+    model: 'gemini-3.1-flash-image',
+    channel_id: 'channel_gemini',
+    expires_at: new Date(Date.now() + 60_000).toISOString()
+  }));
+
+  upstream.post('/v1beta/models/gemini-3.1-flash-image:generateContent', async (request) => {
+    received.apiKey = request.headers['x-goog-api-key'] as string | undefined;
+    received.authorization = request.headers.authorization;
+    received.body = request.body;
+    return {
+      candidates: [{
+        content: {
+          parts: [{
+            inlineData: {
+              mimeType: 'image/png',
+              data: tinyPngBase64
+            }
+          }]
+        }
+      }],
+      usageMetadata: {
+        promptTokenCount: 25,
+        toolUsePromptTokenCount: 2,
+        candidatesTokenCount: 1120,
+        thoughtsTokenCount: 5,
+        totalTokenCount: 1152,
+        cachedContentTokenCount: 3,
+        promptTokensDetails: [
+          { modality: 'TEXT', tokenCount: 20 },
+          { modality: 'IMAGE', tokenCount: 5 }
+        ],
+        toolUsePromptTokensDetails: [
+          { modality: 'TEXT', tokenCount: 2 }
+        ],
+        candidatesTokensDetails: [
+          { modality: 'IMAGE', tokenCount: 1120 }
+        ]
+      }
+    };
+  });
+
+  await upstream.listen({ port: 0, host: '127.0.0.1' });
+  const address = upstream.server.address();
+  assert.ok(address && typeof address === 'object');
+  upstreamBaseUrl = `http://127.0.0.1:${(address as AddressInfo).port}`;
+
+  const completed: Array<{
+    status: string;
+    result: Record<string, unknown> | null;
+    usage: Record<string, unknown> | null;
+    callbackPayload: Record<string, unknown> | null;
+  }> = [];
+  const task = buildTask({
+    model: 'gemini-3.1-flash-image',
+    attempts: 1,
+    parameters: {
+      size: '1024x1024',
+      n: 1,
+      output_format: 'png'
+    },
+    provider_options: {
+      google: {
+        generationConfig: {
+          seed: 7
+        }
+      }
+    },
+    executor: {
+      type: 'provider_direct_lease',
+      lease_id: 'lease_gemini',
+      resolve_url:
+        `${upstreamBaseUrl}/api/internal/image/credential-leases/lease_gemini/resolve`,
+      secret_id: 'image_handle_1'
+    }
+  });
+  const store = {
+    claimTask: async () => task,
+    completeTask: async (args: {
+      status: string;
+      result: Record<string, unknown> | null;
+      usage: Record<string, unknown> | null;
+      callbackPayload: Record<string, unknown> | null;
+    }) => {
+      completed.push(args);
+      return task;
+    },
+    retryTask: async () => false
+  };
+  let uploadCalls = 0;
+  let uploadedBytes = 0;
+  let uploadedContentType = '';
+  const dispatcher = new (await import('undici')).Agent();
+
+  try {
+    await processTask({
+      job: {
+        data: {
+          provider_task_id: task.provider_task_id,
+          node_id: 'test-node',
+          assignment_version: 1
+        }
+      } as never,
+      config: buildTestConfig({
+        credentialLeaseAllowedHosts: [`127.0.0.1:${(address as AddressInfo).port}`]
+      }),
+      store: store as never,
+      taskQueue: {
+        add: async () => undefined
+      } as never,
+      rateLimiter: {
+        waitForToken: async (request: { provider: string; model: string; channelId?: string }) => {
+          received.rateLimit = request;
+        }
+      } as never,
+      imageProcessingLimiter: {
+        acquire: async () => () => undefined
+      } as never,
+      upstreamDispatcher: dispatcher,
+      r2Client: {} as never,
+      upload: async (args: any) => {
+        uploadCalls += 1;
+        uploadedBytes = args.buffer.length;
+        uploadedContentType = args.contentType;
+        return 'https://img.example.com/images/gemini.png';
+      }
+    });
+  } finally {
+    await dispatcher.close();
+    await upstream.close();
+  }
+
+  assert.equal(received.apiKey, 'gemini-lease-secret');
+  assert.equal(received.authorization, undefined);
+  assert.deepEqual(received.rateLimit, {
+    provider: 'google_gemini',
+    model: 'gemini-3.1-flash-image',
+    channelId: 'channel_gemini'
+  });
+  const upstreamBody = received.body as {
+    contents: Array<{ parts: Array<{ text?: string }> }>;
+    generationConfig: {
+      seed: number;
+      imageConfig: { aspectRatio: string; imageSize: string };
+      responseModalities: string[];
+    };
+  };
+  assert.equal(upstreamBody.contents[0]?.parts[0]?.text, 'a cyberpunk city');
+  assert.deepEqual(upstreamBody.generationConfig, {
+    seed: 7,
+    imageConfig: {
+      aspectRatio: '1:1',
+      imageSize: '1K'
+    },
+    responseModalities: ['IMAGE']
+  });
+  assert.equal(uploadCalls, 1);
+  assert.equal(uploadedBytes, Buffer.from(tinyPngBase64, 'base64').length);
+  assert.equal(uploadedContentType, 'image/png');
+  assert.equal(completed.length, 1);
+  assert.equal(completed[0]?.status, 'succeeded');
+  assert.deepEqual(completed[0]?.usage, {
+    prompt_tokens: 27,
+    completion_tokens: 1125,
+    total_tokens: 1152,
+    input_tokens: 27,
+    output_tokens: 1125,
+    cached_tokens: 3,
+    image_tokens: 5,
+    audio_tokens: 0,
+    prompt_tokens_details: {
+      cached_tokens: 3,
+      text_tokens: 22,
+      audio_tokens: 0,
+      image_tokens: 5
+    },
+    input_tokens_details: {
+      cached_tokens: 3,
+      text_tokens: 22,
+      audio_tokens: 0,
+      image_tokens: 5
+    },
+    completion_tokens_details: {
+      reasoning_tokens: 5
+    }
+  });
+  const result = completed[0]?.result as {
+    images: Array<{ url: string; mime_type: string }>;
+    raw_response: {
+      candidates: Array<{ content: { parts: Array<{ inlineData: { data: string } }> } }>;
+      usageMetadata: { totalTokenCount: number };
+    };
+    raw_response_omitted_fields: string[];
+  };
+  assert.equal(result.images[0]?.url, 'https://img.example.com/images/gemini.png');
+  assert.equal(result.images[0]?.mime_type, 'image/png');
+  assert.equal(result.raw_response.candidates[0]?.content.parts[0]?.inlineData.data, '[omitted]');
+  assert.equal(result.raw_response.usageMetadata.totalTokenCount, 1152);
+  assert.ok(result.raw_response_omitted_fields.includes('candidates[].content.parts[].inlineData.data'));
+  assert.deepEqual(
+    (completed[0]?.callbackPayload as { usage: Record<string, unknown> }).usage,
+    completed[0]?.usage
+  );
+  assert.equal(JSON.stringify(completed[0]).includes(tinyPngBase64), false);
+  assert.equal(JSON.stringify(completed[0]).includes('gemini-lease-secret'), false);
+});
+
 test('mixed URL and base64 outputs preserve order and upload only base64', async () => {
   const dispatcher = new (await import('undici')).Agent();
   let uploadCalls = 0;

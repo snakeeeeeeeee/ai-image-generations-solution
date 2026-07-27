@@ -63,6 +63,7 @@ export type ImageOperation = 'generation' | 'edit';
 export type UpstreamDispatcher = Agent;
 
 export interface UpstreamRequestPayload {
+  url?: string;
   body: string | FormData;
   headers: Record<string, string>;
   strategy: ImageModelStrategy;
@@ -238,6 +239,10 @@ function safeJsonForLog(value: unknown): unknown {
   const output: Record<string, unknown> = {};
   for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
     const lower = key.toLowerCase();
+    if ((lower === 'prompt' || lower === 'text') && typeof item === 'string') {
+      output[key] = '[redacted]';
+      continue;
+    }
     if (lower.includes('b64_json') || lower.includes('base64') || lower.includes('api_key') || lower.includes('authorization') || lower.includes('secret')) {
       output[key] = '[redacted]';
       continue;
@@ -392,7 +397,7 @@ export async function fetchUpstream({
 }): Promise<Response> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), config.upstream.timeoutMs);
-  const url = upstreamUrl(config, operation);
+  const url = payload.url ?? upstreamUrl(config, operation);
 
   try {
     logUpstreamRequest(debug, {

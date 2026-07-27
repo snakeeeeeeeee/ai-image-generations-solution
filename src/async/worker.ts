@@ -20,6 +20,14 @@ import { loadImageSource } from '../image-runner.js';
 import { readImageMetadata } from '../image.js';
 import { sanitizeRawResponse } from './raw-response.js';
 import {
+  buildGeminiUpstreamPayload,
+  extractGeminiBase64Result,
+  GEMINI_PROVIDER,
+  GEMINI_REQUEST_FORMAT,
+  normalizeGeminiUsage,
+  type GeminiCredentialLease
+} from '../gemini-image.js';
+import {
   createWorkerRuntimeState,
   removeWorkerHeartbeat,
   trackWorkerTaskFinish,
@@ -30,23 +38,15 @@ import {
 } from './worker-heartbeat.js';
 
 const MAX_DIRECT_EXECUTE_ATTEMPTS = 3;
-const SUPPORTED_PROVIDER = 'openai_compatible';
-const SUPPORTED_REQUEST_FORMAT = 'openai_images';
+const OPENAI_PROVIDER = 'openai_compatible';
+const OPENAI_REQUEST_FORMAT = 'openai_images';
 
 export interface AsyncWorkerRuntime {
   worker: Worker<TaskQueuePayload, void, string>;
   close: () => Promise<void>;
 }
 
-interface CredentialLease {
-  provider: string;
-  request_format: string;
-  base_url: string;
-  api_key: string;
-  model: string;
-  channel_id?: string;
-  expires_at?: string;
-}
+interface CredentialLease extends GeminiCredentialLease {}
 
 interface DirectExecuteResult {
   data: TaskResultImage[];
@@ -55,6 +55,9 @@ interface DirectExecuteResult {
   upstreamResponse: unknown;
   output: Record<string, unknown>;
   metadata: Record<string, unknown>;
+  base64Result?: {
+    images: Array<{ b64_json: string; mime_type?: string }>;
+  };
 }
 
 interface TaskResultImage {
@@ -221,7 +224,7 @@ export async function processTask({
           base64ResultRedis,
           claimed.provider_task_id,
           claimed.assignment_version,
-          extractBase64TaskResult(result.upstreamResponse)
+          result.base64Result ?? extractBase64TaskResult(result.upstreamResponse)
         );
       }
       const callbackPayload = buildCallbackPayload({
@@ -423,6 +426,17 @@ async function executeDirectLeaseTask({
   r2Client: ReturnType<typeof createR2Client>;
   upload: UploadImageToR2;
 }): Promise<DirectExecuteResult> {
+  if (isGeminiLease(lease)) {
+    return executeGeminiLeaseTask({
+      task,
+      lease,
+      config,
+      dispatcher,
+      r2Client,
+      upload
+    });
+  }
+
   const directConfig = configForLease(config, lease, task.operation);
   const body = buildOpenAICompatibleBody(task, lease);
   const payload = task.operation === 'edit'
@@ -453,6 +467,60 @@ async function executeDirectLeaseTask({
     output: buildOutputPayload(execution.upstreamResponse),
     metadata: buildExecutionMetadata({ task, execution })
   };
+}
+
+async function executeGeminiLeaseTask({
+  task,
+  lease,
+  config,
+  dispatcher,
+  r2Client,
+  upload
+}: {
+  task: AsyncTaskRecord;
+  lease: CredentialLease;
+  config: AppConfig;
+  dispatcher: UpstreamDispatcher;
+  r2Client: ReturnType<typeof createR2Client>;
+  upload: UploadImageToR2;
+}): Promise<DirectExecuteResult> {
+  const payload = await buildGeminiUpstreamPayload({
+    task,
+    lease,
+    config,
+    dispatcher
+  });
+  logDirectLeaseDebug(task, lease, config);
+  const execution = await executeUpstreamPayload({
+    payload,
+    config,
+    operation: task.operation,
+    dispatcher,
+    r2Client,
+    upload,
+    debug: {
+      enabled: isUpstreamDebugEnabled(task),
+      taskId: task.client_task_id,
+      providerTaskId: task.provider_task_id,
+      channelId: lease.channel_id || getString(task.metadata.channel_id)
+    }
+  });
+
+  return {
+    data: buildResultImages(execution),
+    usage: normalizeGeminiUsage(execution.upstreamResponse),
+    rawResponse: execution.upstreamResponse,
+    upstreamResponse: execution.upstreamResponse,
+    output: execution.responseParams,
+    metadata: buildExecutionMetadata({ task, execution }),
+    base64Result: isBase64ResultRequested(task)
+      ? extractGeminiBase64Result(execution.upstreamResponse)
+      : undefined
+  };
+}
+
+function isGeminiLease(lease: CredentialLease): boolean {
+  return lease.provider === GEMINI_PROVIDER && lease.request_format === GEMINI_REQUEST_FORMAT;
 }
 
 function buildResultImages(execution: ImageExecutionResult): TaskResultImage[] {
@@ -539,7 +607,8 @@ function logDirectLeaseDebug(task: AsyncTaskRecord, lease: CredentialLease, conf
     base_url: lease.base_url,
     model: lease.model,
     operation: task.operation,
-    final_path: task.operation === 'generation' ? config.upstream.imagesPath : config.upstream.imageEditsPath,
+    final_path: lease.endpoint_url ??
+      (task.operation === 'generation' ? config.upstream.imagesPath : config.upstream.imageEditsPath),
     expires_at: lease.expires_at
   })}`);
 }
@@ -812,7 +881,10 @@ function getCredentialLeaseSecret(task: AsyncTaskRecord, config: AppConfig): str
 }
 
 function assertSupportedLease(value: CredentialLease): void {
-  if (value.provider !== SUPPORTED_PROVIDER || value.request_format !== SUPPORTED_REQUEST_FORMAT) {
+  const isOpenAI =
+    value.provider === OPENAI_PROVIDER &&
+    value.request_format === OPENAI_REQUEST_FORMAT;
+  if (!isOpenAI && !isGeminiLease(value)) {
     throw new AppError('credential lease request format is unsupported', {
       statusCode: 400,
       type: 'invalid_request_error',
@@ -832,6 +904,7 @@ function parseCredentialLease(value: unknown): CredentialLease {
     base_url: requireString(body, 'base_url'),
     api_key: requireString(body, 'api_key'),
     model: requireString(body, 'model'),
+    endpoint_url: getString(body.endpoint_url),
     channel_id: getString(body.channel_id),
     expires_at: getString(body.expires_at)
   };

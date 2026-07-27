@@ -1,5 +1,24 @@
 # Progress
 
+- 2026-07-28: Started Phase 15 for Gemini image generation/editing across image-handle, new-api, Resource Center/OpenAPI, and supertokendoc. Locked provider-neutral orchestration, strict single-image/no-mask behavior, controlled `provider_options.google`, usage-based settlement, and mandatory GPT-Image regression.
+- 2026-07-28: Added the image-handle Gemini lease adapter, exact endpoint/x-goog-api-key execution, strict public/provider parameter validation, generation/edit request construction, URL/Base64 extraction, usage normalization, and path-aware inlineData redaction. The first full `npm test` passed 84/84 including all existing GPT/xAI coverage.
+- 2026-07-28: Added new-api Gemini target-model routing, structured JSON/multipart provider options, strict first-layer public/provider validation, exact versioned Gemini credential leases, and request/fingerprint coverage. Focused service/relay/controller/helper/imagehandle tests pass while Imagen remains on its legacy path.
+- 2026-07-28: Added the provider-neutral Resource Center/OpenAPI updates and the structured `gemini-new` documentation set; the VitePress production build passes.
+- 2026-07-28: Rebuilt the local Docker stack and completed real Gemini acceptance for both target models: sync generation/editing, URL/Base64, four async generation/edit tasks, R2 assets, polling, normalized usage, and four authenticated Webhooks all passed.
+- 2026-07-28: Real fixed-price verification found Gemini Pro was precharged 50000 instead of its configured 250000-equivalent quota because the global async image estimate overwrote `ModelPrice`. The remaining implementation starts with preserving fixed-price precharge, then reruns Pro acceptance and GPT-Image regression.
+- 2026-07-28: Confirmed the minimal fixed-price repair: keep the existing usage pricing snapshot resolution, but skip global per-image precharge and usage-billing labels when `PriceData.UsePrice` is true. Image parameter pricing already has an equivalent dedicated guard.
+- 2026-07-28: Added fixed-price and token-priced precharge symmetry tests. The first token fixture exposed its direct-construction gap (`metadata.n` was absent because adaptor normalization was bypassed); updated it to match the production-normalized request shape.
+- 2026-07-28: Fixed-price repair passed focused relay tests and the complete `go test ./...` suite. The first frontend build command was invoked from the repository root, which has no build script; verification continues from the `web/` workspace.
+- 2026-07-28: new-api Vite production assets were generated successfully. The stricter OpenAPI check then found the committed JSON was ahead of its generator source; fixing generator ownership is now required before documentation verification can be marked complete.
+- 2026-07-28: Moved all Gemini Resource Center OpenAPI changes into `web/scripts/generate-resource-center-openapi.mjs`, regenerated the public JSON, and passed `bun run openapi:check`. The generated contract now owns Gemini request examples, Google provider options, normalized usage, and the Gemini success Webhook example.
+- 2026-07-28: Release-level static verification passed after the billing/OpenAPI fixes: image-handle `npm test` passed 85/85 and `npm run build` passed; new-api `go test ./...`, `web` Vite build, and OpenAPI round-trip check passed; supertokendoc VitePress build passed. Only existing bundle-size/eval/browser-data advisories remain.
+- 2026-07-28: Rebuilt only `new-api-dev` and submitted a real Gemini Pro async generation. It precharged 250000 instead of the old erroneous 50000 and completed at the same fixed quota with usage 11/1120/1131. Acceptance then exposed a remaining audit issue: the fixed-price consume log did not copy those usage tokens.
+- 2026-07-28: Selected the existing image execution audit merge as the fixed-price usage-log path. It will be generalized to fixed-price image tasks and retain its persisted consume-log ID fallback so fast callbacks cannot lose usage.
+- 2026-07-28: Generalized the execution audit merge to fixed-price image tasks, invoked it before the per-call settlement return, and renamed the post-submit race reconciler accordingly. Focused service tests prove fixed quota remains unchanged while the original consume log receives prompt/completion usage.
+- 2026-07-28: Added a fixed-price early-callback race regression and reran `go test ./...`; the complete new-api Go suite passes with both direct and post-submit usage-log reconciliation covered.
+- 2026-07-28: Rebuilt new-api again and completed the final fixed-price Docker acceptance: Pro reserved and retained 250000 quota, task usage was 12/1120/1132, the original consume log was updated to 12/1120 without a second log, and one Asset was created.
+- 2026-07-28: Completed real token-pricing Docker acceptance under a temporary local-only ratio configuration. The task reserved 50000, supplemented to 168033 from normalized usage, updated the consume log tokens and billing direction, created one Asset, and the exit trap restored the original `$0.5` fixed price; new-api is healthy after restoration.
+- 2026-07-28: Started real GPT-Image regression with `adobe-gpt-image-2-count`. Synchronous URL generation passed with usage 13 input / 196 output / 209 total. The following Base64 request returned one item but no `b64_json`, so the script stopped before edit and the failure is under investigation.
 - 2026-07-27: Started Phase 13 implementation for load-aware per-node scheduling, stale-assignment safety, automatic failover, and worker/task node observability.
 - 2026-07-27: Confirmed the repository is clean and the supplied implementation plan is the validated design; recorded its locked decisions before code changes.
 - 2026-07-27: Inspected the initial configuration, queue, worker, heartbeat, route, and store surfaces; confirmed the current recovery and queue ownership are worker-global and need assignment-aware separation.
@@ -60,3 +79,14 @@
 - 2026-07-14: Final `npm test` passed 66/66; runtime and pre-rebuild logs remain archived in new-api `tmp/codex-image-pricing/runtime-logs/`.
 - 2026-07-17: Started updating the E2E Webhook receiver fixture for new-api's single URL/Bearer-key contract; image-handle product code remains out of scope.
 - 2026-07-17: Completed the Bearer-key receiver fixture with configurable failure/success responses and event capture; full tests and shared-network new-api integration passed.
+
+## Phase 15 Resume
+
+- 2026-07-28: Resumed GPT-Image regression. Confirmed the live new-api container does not set either sync result policy environment variable and source defaults to request-following behavior.
+- 2026-07-28: Confirmed the two latest GPT sync calls ran through the current image-handle image and completed successfully; continued with runtime request/result inspection.
+- 2026-07-28: Identified the GPT Base64 discrepancy as channel 90's persisted `response_format=url` parameter override. Planned a temporary local override removal for regression, followed by exact restoration.
+- 2026-07-28: Completed real GPT sync Base64 regression under the temporary local channel setting and restored the original override; result shape and usage passed.
+- 2026-07-28: Completed real GPT sync edit regression with URL output and image-token usage.
+- 2026-07-28: Prepared GPT async generation/edit/Webhook acceptance against the documented provider-neutral task contract and confirmed the account Webhook baseline before mutation.
+- 2026-07-28: Completed real GPT async generation and edit acceptance: task polling, URL results, Assets, usage, consume logs, and authenticated account Webhooks all passed; restored the original account Webhook URL.
+- 2026-07-28: Completed final release verification across all three repositories and confirmed every temporary runtime setting was restored. Phase 15 is complete.

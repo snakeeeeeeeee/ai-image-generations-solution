@@ -87,6 +87,25 @@ Completed scope: a horizontally scalable async image task execution mode for new
 - Move drain mode and manual R2 upload into a dedicated system-tools view.
 - Use a desktop navigation rail and a compact top navigation grid on narrow screens.
 
+## Phase 15: Gemini Images provider adapter and unified public contract
+
+- [complete] Add `gemini_generate_content` credential leases without changing existing OpenAI/XAI lease execution.
+- [complete] Add strict Gemini request/parameter validation, generation/edit payloads, image extraction, usage normalization, and raw-response redaction.
+- [complete] Extend new-api synchronous/async image contracts, Gemini channel lease resolution, and usage-based terminal settlement.
+- [complete] Update the provider-neutral Resource Center/OpenAPI documentation and add the structured `gemini-new` documentation set.
+- [complete] Run full image-handle, new-api, and supertokendoc builds/tests plus real Gemini acceptance and GPT-Image regression.
+
+### Phase 15 decisions
+
+**Status:** complete
+
+- Supported upstream models are `gemini-3.1-flash-image` and `gemini-3-pro-image-count`.
+- Public task, asset, callback, Webhook, idempotency, scheduling, and billing lifecycles remain provider-neutral.
+- Gemini differences are isolated to lease resolution, request building, parameter validation, response extraction, error mapping, and usage normalization.
+- Gemini produces exactly one PNG image per task, supports generation and image editing, and rejects masks.
+- Existing Gemini native/Chat and GPT-Image paths remain compatible; no new database fields or environment variables are introduced.
+- Rollout order is image-handle first, new-api second, and documentation last.
+
 ## Errors Encountered
 
 | Error | Attempt | Resolution |
@@ -111,3 +130,18 @@ Completed scope: a horizontally scalable async image task execution mode for new
 | Reconnected CDP interception received an invalid stale interception id | 1 | Stop the unstable interception approach after three distinct failures. Serve the built admin UI and fixture endpoints from a disposable local read-only preview server instead. |
 | Browser `getByLabel("自动刷新")` did not resolve the visible select | 1 | Take a fresh DOM snapshot and use the stable unique `.refresh-select select` selector from the rendered markup. |
 | Planning completion script reported zero completed phases | 1 | The long-lived plan used checklist statuses instead of the script's marker. Added explicit completion markers to the two level-three phase-decision sections it detects. |
+| Focused new-api tests retained legacy expectations that Gemini channels and multipart `provider_options` were unsupported | 1 | Updated those expectations and added target-model/Imagen routing plus JSON/multipart provider-options coverage. |
+| Real Gemini Pro async acceptance precharged the same 50000 quota as the cheaper Flash fixed-price model | 1 | `applyAsyncImageUsagePrecharge` overwrote the per-model `ModelPrice` result with the global per-image estimate. Preserve fixed-price and image-pricing results; apply the usage estimate only to token-priced models. |
+| New token-pricing precharge unit test resolved `n=1` instead of `n=2` | 1 | The direct fixture bypassed adaptor normalization, while production reads normalized `metadata.n`. Populate `metadata.n` in the fixture and retain `N` as the public input. |
+| `bun run build` at the new-api repository root reported `Script not found "build"` | 1 | The frontend is a separate `web/` workspace. Read its package scripts and run the build from that directory. |
+| Package-script inspection tried to require a nonexistent root `package.json` | 1 | new-api's Go root has no Node manifest; inspect and build only `web/package.json`. |
+| `bun run openapi:check` reported `docs/openapi/resource-center.json is out of date` | 1 | Gemini additions were applied to the generated JSON but not its generator source. Move the schema/example changes into the source consumed by `generate-resource-center-openapi.mjs`, regenerate, and rerun the check. |
+| zsh rejected `status` in the Docker health polling loop as a read-only variable | 1 | Rename the local shell variable to `health_state`; this did not affect the recreated container. |
+| Asset acceptance query compared varchar `assets.task_id` with bigint `tasks.id` | 1 | Query Assets by the public string task ID directly; the mismatch was limited to diagnostic SQL. |
+| Real fixed-price Gemini task kept correct quota but its consume-log token columns remained zero | 1 | The fixed-price success branch returned before merging normalized usage into the original consume log. Add a provider-neutral fixed-price image usage audit merge without recalculating quota. |
+| GPT synchronous `response_format=b64_json` returned one result without `b64_json` | 1 | URL mode and usage succeeded, but the regression script stopped before edit. Inspect new-api/image-handle response-format normalization and result conversion before deciding whether this is a request-shape issue or a behavioral regression. |
+| Queried `image_tasks` in the new-api PostgreSQL container | 1 | The table belongs to `image-handle-dev-image-handle-postgres-1`; switched subsequent diagnostics to the correct container. |
+| Queried nonexistent `result_data_format` task column | 1 | The persisted format lives in task metadata/parameters; queried `parameters_json.response_format` and result shape instead. |
+| Queried JSON paths on the text `logs.other` column | 1 | This diagnostic was unnecessary after the channel override directly identified the runtime format mutation; do not repeat it. |
+| Base64 regression shell was rejected before execution because cleanup used `rm -f` | 1 | Switched temporary-file cleanup to single-file `unlink`; the guarded request then completed and restored channel configuration. |
+| GPT async diagnostic selected nonexistent `tasks.model` and `tasks.group_name` columns | 2 | Asset, consume-log, public task, and Webhook checks already supplied the required acceptance evidence; inspect the schema before any further task-table query. |
