@@ -1182,14 +1182,14 @@ test('worker executes Gemini lease with x-goog-api-key, normalized usage, R2 URL
     request_format: 'gemini_generate_content',
     base_url: upstreamBaseUrl,
     endpoint_url:
-      `${upstreamBaseUrl}/v1beta/models/gemini-3.1-flash-image:generateContent`,
+      `${upstreamBaseUrl}/v1beta/models/vendor-flash-image-v7:generateContent`,
     api_key: 'gemini-lease-secret',
-    model: 'gemini-3.1-flash-image',
+    model: 'vendor-flash-image-v7',
     channel_id: 'channel_gemini',
     expires_at: new Date(Date.now() + 60_000).toISOString()
   }));
 
-  upstream.post('/v1beta/models/gemini-3.1-flash-image:generateContent', async (request) => {
+  upstream.post('/v1beta/models/vendor-flash-image-v7:generateContent', async (request) => {
     received.apiKey = request.headers['x-goog-api-key'] as string | undefined;
     received.authorization = request.headers.authorization;
     received.body = request.body;
@@ -1319,7 +1319,7 @@ test('worker executes Gemini lease with x-goog-api-key, normalized usage, R2 URL
   assert.equal(received.authorization, undefined);
   assert.deepEqual(received.rateLimit, {
     provider: 'google_gemini',
-    model: 'gemini-3.1-flash-image',
+    model: 'vendor-flash-image-v7',
     channelId: 'channel_gemini'
   });
   const upstreamBody = received.body as {

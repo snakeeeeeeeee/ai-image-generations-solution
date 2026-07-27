@@ -1,5 +1,8 @@
 # Progress
 
+- 2026-07-28: Rebuilt `image-handle:dev` and `new-api-local:dev`, recreated the local Docker services without touching PostgreSQL/Redis volumes, and completed mapped-Gemini terminal acceptance. Public `gemini-3-pro-image-count` mapped to opaque `vendor-pro-image-v7`, succeeded with one R2-backed image and normalized usage 7/11/18; public `gemini-3.1-flash-image` mapped to a mock failing upstream, reached `failed`, refunded its precharge, and atomically changed the original log to error type 5. The temporary channel URL/mapping and mock container were removed, channel 11 was restored, and all image-handle roles remained running.
+- 2026-07-28: Started Phase 16 after production exposed mapped Gemini model rejection and the user confirmed terminal async failures should persist as error-type new-api logs. Locked a no-schema separation of public model, channel protocol, and upstream model responsibilities.
+
 - 2026-07-28: Started Phase 15 for Gemini image generation/editing across image-handle, new-api, Resource Center/OpenAPI, and supertokendoc. Locked provider-neutral orchestration, strict single-image/no-mask behavior, controlled `provider_options.google`, usage-based settlement, and mandatory GPT-Image regression.
 - 2026-07-28: Added the image-handle Gemini lease adapter, exact endpoint/x-goog-api-key execution, strict public/provider parameter validation, generation/edit request construction, URL/Base64 extraction, usage normalization, and path-aware inlineData redaction. The first full `npm test` passed 84/84 including all existing GPT/xAI coverage.
 - 2026-07-28: Added new-api Gemini target-model routing, structured JSON/multipart provider options, strict first-layer public/provider validation, exact versioned Gemini credential leases, and request/fingerprint coverage. Focused service/relay/controller/helper/imagehandle tests pass while Imagen remains on its legacy path.
@@ -90,3 +93,12 @@
 - 2026-07-28: Prepared GPT async generation/edit/Webhook acceptance against the documented provider-neutral task contract and confirmed the account Webhook baseline before mutation.
 - 2026-07-28: Completed real GPT async generation and edit acceptance: task polling, URL results, Assets, usage, consume logs, and authenticated account Webhooks all passed; restored the original account Webhook URL.
 - 2026-07-28: Completed final release verification across all three repositories and confirmed every temporary runtime setting was restored. Phase 15 is complete.
+
+## Phase 16
+
+- 2026-07-28: Added the cross-repository design for public model, channel protocol, and mapped upstream model separation plus single-row async failure severity.
+- 2026-07-28: Updated image-handle to validate the public Gemini task model while executing and rate-limiting with the mapped lease model. Full `npm test` passes 86/86, including mapped Gemini worker execution.
+- 2026-07-28: Updated new-api sync/async image payloads and request snapshots to retain the public model, while credential leases retain the mapped upstream model and Gemini endpoint construction uses the public model's version setting.
+- 2026-07-28: Added terminal log type snapshots and an idempotent guarded `consume -> error` update. Callback failure, timeout, missing upstream ID, and channel-read failure tests now require error logs; successful and legacy snapshots remain consume logs.
+- 2026-07-28: Package-level new-api tests pass for controller, model, relay, the image-handle task adaptor, and service. Full repository verification remains.
+- 2026-07-28: Release verification passed: image-handle `npm test` passed 86/86 and `npm run build` completed; new-api `go test ./...` passed. Only the existing Vite chunk-size advisory remains. Phase 16 is complete.

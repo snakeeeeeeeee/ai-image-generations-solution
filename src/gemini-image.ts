@@ -337,8 +337,8 @@ function optionalScalar(value: unknown): string | number | boolean | undefined {
   return undefined;
 }
 
-function assertGeminiTask(task: AsyncTaskRecord, lease: GeminiCredentialLease): void {
-  const model = (lease.model || task.model).trim().toLowerCase();
+function assertGeminiTask(task: AsyncTaskRecord): void {
+  const model = task.model.trim().toLowerCase();
   if (!SUPPORTED_MODELS.has(model)) {
     invalidRequest('Gemini image model is unsupported', 'model_not_supported', 'model');
   }
@@ -538,7 +538,7 @@ export async function buildGeminiUpstreamPayload({
   config: AppConfig;
   dispatcher: UpstreamDispatcher;
 }): Promise<UpstreamRequestPayload> {
-  assertGeminiTask(task, lease);
+  assertGeminiTask(task);
   const inlineImages: GeminiInlineImage[] = [];
   const imageUrls = Array.isArray(task.input.images)
     ? task.input.images.filter((item): item is string => typeof item === 'string' && item.trim() !== '')

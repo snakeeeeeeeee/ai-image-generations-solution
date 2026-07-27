@@ -106,6 +106,26 @@ Completed scope: a horizontally scalable async image task execution mode for new
 - Existing Gemini native/Chat and GPT-Image paths remain compatible; no new database fields or environment variables are introduced.
 - Rollout order is image-handle first, new-api second, and documentation last.
 
+## Phase 16: Mapped Gemini models and async failure log severity
+
+- [complete] Separate public model validation, channel protocol selection, and mapped upstream model execution in new-api.
+- [complete] Make image-handle validate the public task model while executing the mapped lease model.
+- [complete] Mark terminally failed asynchronous image task logs as error logs after refund settlement.
+- [complete] Add mapped-model, unsupported-public-model, synchronous/asynchronous, billing-log, and GPT/OpenAI regression coverage.
+- [complete] Run complete image-handle and new-api test/build verification.
+- [complete] Rebuild both local Docker images and verify mapped Gemini success, terminal failure/refund, error-log severity, usage, and runtime cleanup end to end.
+
+### Phase 16 decisions
+
+**Status:** complete
+
+- The public model name owns capability validation and billing semantics.
+- The selected channel type owns the credential lease request format.
+- The mapped upstream model name is opaque and is used only for the upstream endpoint/model.
+- A terminal asynchronous image failure must update its persisted new-api consume log to error severity after refund; accepted or still-running tasks remain normal.
+- Failure severity is carried in the existing terminal consume-log snapshot and applied atomically to the original precharge row, preserving the single-row audit and fast-callback reconciliation design.
+- No new environment variables, manual mapped-model allowlists, or database fields are introduced.
+
 ## Errors Encountered
 
 | Error | Attempt | Resolution |
@@ -119,6 +139,7 @@ Completed scope: a horizontally scalable async image task execution mode for new
 | Docker Compose dev build failed on Docker Hub auth token fetch | `docker compose -f deploy/docker-compose.dev.yml --env-file deploy/.env.example build` | Stopped per blocker policy. Error: `node:22-bookworm-slim: failed to authorize ... auth.docker.io/token ... i/o timeout`; npm tests, full build, and compose config validation passed |
 | TypeScript compile required the new persisted fingerprint on the shared task fixture | Phase 11 build attempt 1 | Add the deterministic fixture value and focused fingerprint/provider-options tests before rerunning. |
 | Docker diagnostic queried nonexistent `async_tasks` instead of the actual `image_tasks` table | 1 | List PostgreSQL tables and query the real image task table on the next check. |
+| Initial mapped-Gemini Docker harness read `.task_id`, used host port 3000, and polled with a model token | Phase 16 Docker acceptance | Use the public response `.id`, the compose-published host port 3001, and the existing Resource Center key for task reads; keep the model token only for submission. |
 | Pinned-download reproduction imported `/app/dist/safe-url.js`, but compiled sources live under a different dist path | 1 | Inspect the runtime dist tree and rerun against the actual module path. |
 | First pinned-fetch regression returned `ECONNREFUSED ::1` because the fixture server listened only on IPv4 while one pinned DNS address was returned | 1 | Return the complete already-validated DNS result for Undici `all:true` lookups, preserving pinning while enabling IPv4/IPv6 fallback. |
 | Phase 13 first TypeScript check found node aggregate fields on the per-instance heartbeat interface and old test route fixtures | 1 | Move aggregate-only fields to `WorkerNodeHeartbeat`, then update task fixtures and route scheduler stubs before rerunning. |
@@ -145,3 +166,5 @@ Completed scope: a horizontally scalable async image task execution mode for new
 | Queried JSON paths on the text `logs.other` column | 1 | This diagnostic was unnecessary after the channel override directly identified the runtime format mutation; do not repeat it. |
 | Base64 regression shell was rejected before execution because cleanup used `rm -f` | 1 | Switched temporary-file cleanup to single-file `unlink`; the guarded request then completed and restored channel configuration. |
 | GPT async diagnostic selected nonexistent `tasks.model` and `tasks.group_name` columns | 2 | Asset, consume-log, public task, and Webhook checks already supplied the required acceptance evidence; inspect the schema before any further task-table query. |
+| Mapped sync payload test reused the GPT seed-cleanup fixture and unexpectedly retained `provider_options.seed` | 1 | Restored the original GPT fixture and added a separate mapped-model payload test so the two behaviors are isolated. |
+| Broad test expectation patch changed the wrong identical `payload["model"]` assertion | 2 | Inspected both exact line contexts and updated the unmapped and mapped expectations independently. |

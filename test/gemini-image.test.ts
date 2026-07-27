@@ -214,9 +214,9 @@ test('Gemini payload uses lease endpoint and x-goog-api-key without Bearer auth'
       request_format: 'gemini_generate_content',
       base_url: 'https://generativelanguage.googleapis.com',
       endpoint_url:
-        'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-image:generateContent',
+        'https://generativelanguage.googleapis.com/v1beta/models/vendor-flash-image-v7:generateContent',
       api_key: 'lease-secret',
-      model: 'gemini-3.1-flash-image'
+      model: 'vendor-flash-image-v7'
     },
     config: buildConfig(),
     dispatcher: new Agent()
@@ -224,15 +224,37 @@ test('Gemini payload uses lease endpoint and x-goog-api-key without Bearer auth'
 
   assert.equal(
     payload.url,
-    'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-image:generateContent'
+    'https://generativelanguage.googleapis.com/v1beta/models/vendor-flash-image-v7:generateContent'
   );
   assert.equal(payload.headers['x-goog-api-key'], 'lease-secret');
   assert.equal(payload.headers.authorization, undefined);
+  assert.equal(payload.metadata.model, 'vendor-flash-image-v7');
+  assert.equal(payload.requestParams.model, 'vendor-flash-image-v7');
   const body = JSON.parse(String(payload.body));
   assert.deepEqual(body.generationConfig.imageConfig, {
     aspectRatio: '1:1',
     imageSize: '1K'
   });
+});
+
+test('Gemini payload validates the public task model instead of the mapped lease model', async () => {
+  await assert.rejects(
+    buildGeminiUpstreamPayload({
+      task: buildTask({ model: 'gemini-unsupported-public-model' }),
+      lease: {
+        provider: 'google_gemini',
+        request_format: 'gemini_generate_content',
+        base_url: 'https://generativelanguage.googleapis.com',
+        endpoint_url:
+          'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-image:generateContent',
+        api_key: 'lease-secret',
+        model: 'gemini-3.1-flash-image'
+      },
+      config: buildConfig(),
+      dispatcher: new Agent()
+    }),
+    (error: any) => error?.code === 'model_not_supported'
+  );
 });
 
 test('Gemini strategy extracts exactly one inline image or HTTP URL', () => {
