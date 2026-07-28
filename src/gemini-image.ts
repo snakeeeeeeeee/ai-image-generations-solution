@@ -21,6 +21,8 @@ const SUPPORTED_MODELS = new Set([
   'gemini-3.1-flash-image',
   'gemini-3-pro-image-count'
 ]);
+const GEMINI_FLASH_MODEL = 'gemini-3.1-flash-image';
+const GEMINI_PRO_MODEL = 'gemini-3-pro-image-count';
 
 const SIZE_MAP = new Map<string, { aspectRatio: string; imageSize: string }>([
   ['1024x1024', { aspectRatio: '1:1', imageSize: '1K' }],
@@ -44,7 +46,7 @@ const ASPECT_RATIOS = new Set([
   '21:9'
 ]);
 
-const IMAGE_SIZES = new Set(['1K', '2K', '4K']);
+const IMAGE_SIZES = new Set(['512', '1K', '2K', '4K']);
 
 interface GeminiInlineImage {
   mimeType: string;
@@ -148,7 +150,34 @@ function optionalObject(value: unknown, param: string): Record<string, unknown> 
   return value as Record<string, unknown>;
 }
 
-function normalizeImageConfig(value: unknown): Record<string, unknown> | undefined {
+function normalizeImageSize(value: unknown, publicModel: string, param: string): string {
+  const raw = getString(value)?.toUpperCase();
+  const imageSize = raw === '0.5K' ? '512' : raw;
+  if (!imageSize || !IMAGE_SIZES.has(imageSize)) {
+    invalidRequest(`${param} is unsupported`, 'unsupported_image_resolution', param);
+  }
+  if (publicModel === GEMINI_PRO_MODEL && imageSize === '512') {
+    invalidRequest(
+      `${param} is unsupported for ${GEMINI_PRO_MODEL}`,
+      'unsupported_image_resolution',
+      param
+    );
+  }
+  return imageSize;
+}
+
+function normalizeAspectRatio(value: unknown, param: string): string {
+  const aspectRatio = getString(value);
+  if (!aspectRatio || !ASPECT_RATIOS.has(aspectRatio)) {
+    invalidRequest(`${param} is unsupported`, 'unsupported_aspect_ratio', param);
+  }
+  return aspectRatio;
+}
+
+function normalizeImageConfig(
+  value: unknown,
+  publicModel: string
+): Record<string, unknown> | undefined {
   const source = optionalObject(value, 'provider_options.google.generationConfig.imageConfig');
   if (!source) {
     return undefined;
@@ -164,26 +193,17 @@ function normalizeImageConfig(value: unknown): Record<string, unknown> | undefin
   );
 
   if (normalized.aspectRatio !== undefined) {
-    const aspectRatio = getString(normalized.aspectRatio);
-    if (!aspectRatio || !ASPECT_RATIOS.has(aspectRatio)) {
-      invalidRequest(
-        'provider_options.google.generationConfig.imageConfig.aspectRatio is unsupported',
-        'invalid_provider_options',
-        'provider_options.google.generationConfig.imageConfig.aspectRatio'
-      );
-    }
-    normalized.aspectRatio = aspectRatio;
+    normalized.aspectRatio = normalizeAspectRatio(
+      normalized.aspectRatio,
+      'provider_options.google.generationConfig.imageConfig.aspectRatio'
+    );
   }
   if (normalized.imageSize !== undefined) {
-    const imageSize = getString(normalized.imageSize)?.toUpperCase();
-    if (!imageSize || !IMAGE_SIZES.has(imageSize)) {
-      invalidRequest(
-        'provider_options.google.generationConfig.imageConfig.imageSize is unsupported',
-        'invalid_provider_options',
-        'provider_options.google.generationConfig.imageConfig.imageSize'
-      );
-    }
-    normalized.imageSize = imageSize;
+    normalized.imageSize = normalizeImageSize(
+      normalized.imageSize,
+      publicModel,
+      'provider_options.google.generationConfig.imageConfig.imageSize'
+    );
   }
   return normalized;
 }
@@ -230,7 +250,10 @@ function normalizeThinkingConfig(value: unknown): Record<string, unknown> | unde
   return normalized;
 }
 
-function normalizeGenerationConfig(value: unknown): Record<string, unknown> {
+function normalizeGenerationConfig(
+  value: unknown,
+  publicModel: string
+): Record<string, unknown> {
   const source = optionalObject(value, 'provider_options.google.generationConfig') ?? {};
   const normalized = normalizeAliasedObject(
     source,
@@ -261,7 +284,7 @@ function normalizeGenerationConfig(value: unknown): Record<string, unknown> {
     }
   }
 
-  const imageConfig = normalizeImageConfig(normalized.imageConfig);
+  const imageConfig = normalizeImageConfig(normalized.imageConfig, publicModel);
   const thinkingConfig = normalizeThinkingConfig(normalized.thinkingConfig);
   if (imageConfig) {
     normalized.imageConfig = imageConfig;
@@ -304,7 +327,10 @@ function normalizeSafetySettings(value: unknown): Array<Record<string, unknown>>
   });
 }
 
-function normalizeProviderOptions(value: Record<string, unknown>): GeminiRequestSettings {
+function normalizeProviderOptions(
+  value: Record<string, unknown>,
+  publicModel: string
+): GeminiRequestSettings {
   const top = normalizeAliasedObject(
     value,
     {},
@@ -322,7 +348,7 @@ function normalizeProviderOptions(value: Record<string, unknown>): GeminiRequest
     'provider_options.google'
   );
   return {
-    generationConfig: normalizeGenerationConfig(google.generationConfig),
+    generationConfig: normalizeGenerationConfig(google.generationConfig, publicModel),
     safetySettings: normalizeSafetySettings(google.safetySettings)
   };
 }
@@ -364,7 +390,7 @@ function assertGeminiTask(task: AsyncTaskRecord): void {
     invalidRequest('Gemini image tasks only support PNG output', 'unsupported_output_format', 'output_format');
   }
 
-  for (const key of ['output_compression', 'background', 'input_fidelity', 'resolution']) {
+  for (const key of ['output_compression', 'background', 'input_fidelity']) {
     if (optionalScalar(task.parameters[key]) !== undefined) {
       invalidRequest(`Gemini image tasks do not support ${key}`, 'unsupported_parameter', key);
     }
@@ -382,13 +408,22 @@ function assertGeminiTask(task: AsyncTaskRecord): void {
 
 function applySize(
   generationConfig: Record<string, unknown>,
-  parameters: Record<string, unknown>
+  parameters: Record<string, unknown>,
+  publicModel: string
 ): void {
   const existing = safeObject(generationConfig.imageConfig);
   const explicitSize = getString(parameters.size);
-  if (explicitSize && Object.keys(existing).length > 0) {
+  const hasProviderImageConfig = Object.hasOwn(generationConfig, 'imageConfig');
+  const explicitAspectRatio = getString(parameters.aspect_ratio);
+  const explicitResolution = getString(parameters.resolution);
+
+  if (explicitSize && (
+    explicitAspectRatio ||
+    explicitResolution ||
+    hasProviderImageConfig
+  )) {
     invalidRequest(
-      'size duplicates provider_options.google.generationConfig.imageConfig',
+      'size duplicates Gemini aspect ratio or resolution controls',
       'duplicate_parameter',
       'size'
     );
@@ -403,25 +438,50 @@ function applySize(
     return;
   }
 
+  if (explicitAspectRatio && existing.aspectRatio !== undefined) {
+    invalidRequest(
+      'aspect_ratio duplicates provider_options.google.generationConfig.imageConfig.aspectRatio',
+      'duplicate_parameter',
+      'aspect_ratio'
+    );
+  }
+  if (explicitResolution && existing.imageSize !== undefined) {
+    invalidRequest(
+      'resolution duplicates provider_options.google.generationConfig.imageConfig.imageSize',
+      'duplicate_parameter',
+      'resolution'
+    );
+  }
+
   generationConfig.imageConfig = {
-    aspectRatio: getString(existing.aspectRatio) ?? '1:1',
-    imageSize: getString(existing.imageSize) ?? '1K'
+    aspectRatio: explicitAspectRatio
+      ? normalizeAspectRatio(explicitAspectRatio, 'aspect_ratio')
+      : getString(existing.aspectRatio) ?? '1:1',
+    imageSize: explicitResolution
+      ? normalizeImageSize(explicitResolution, publicModel, 'resolution')
+      : getString(existing.imageSize) ?? '1K'
   };
 }
 
 export function buildGeminiRequestBody({
+  publicModel,
   prompt,
   images = [],
   parameters = {},
   providerOptions = {}
 }: {
+  publicModel: string;
   prompt: string;
   images?: GeminiInlineImage[];
   parameters?: Record<string, unknown>;
   providerOptions?: Record<string, unknown>;
 }): Record<string, unknown> {
-  const settings = normalizeProviderOptions(providerOptions);
-  applySize(settings.generationConfig, parameters);
+  const normalizedPublicModel = publicModel.trim().toLowerCase();
+  if (!SUPPORTED_MODELS.has(normalizedPublicModel)) {
+    invalidRequest('Gemini image model is unsupported', 'model_not_supported', 'model');
+  }
+  const settings = normalizeProviderOptions(providerOptions, normalizedPublicModel);
+  applySize(settings.generationConfig, parameters, normalizedPublicModel);
   settings.generationConfig.responseModalities = ['IMAGE'];
 
   const parts: Array<Record<string, unknown>> = [{ text: prompt }];
@@ -558,6 +618,7 @@ export async function buildGeminiUpstreamPayload({
   }
 
   const body = buildGeminiRequestBody({
+    publicModel: task.model,
     prompt: getString(task.input.text) ?? '',
     images: inlineImages,
     parameters: task.parameters,

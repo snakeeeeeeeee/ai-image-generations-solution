@@ -129,6 +129,7 @@ function buildTask(overrides: Partial<AsyncTaskRecord> = {}): AsyncTaskRecord {
 
 test('Gemini request maps strict size and snake_case provider aliases', () => {
   const body = buildGeminiRequestBody({
+    publicModel: 'gemini-3.1-flash-image',
     prompt: 'draw a blue square',
     parameters: { size: '3072x2048' },
     providerOptions: {
@@ -177,6 +178,7 @@ test('Gemini request maps strict size and snake_case provider aliases', () => {
 test('Gemini request rejects duplicate aliases and duplicate size controls', () => {
   assert.throws(
     () => buildGeminiRequestBody({
+      publicModel: 'gemini-3.1-flash-image',
       prompt: 'test',
       providerOptions: {
         google: {
@@ -192,12 +194,101 @@ test('Gemini request rejects duplicate aliases and duplicate size controls', () 
 
   assert.throws(
     () => buildGeminiRequestBody({
+      publicModel: 'gemini-3.1-flash-image',
       prompt: 'test',
       parameters: { size: '1024x1024' },
       providerOptions: {
         google: {
           generationConfig: {
             imageConfig: { aspectRatio: '1:1' }
+          }
+        }
+      }
+    }),
+    (error: any) => error?.code === 'duplicate_parameter'
+  );
+});
+
+test('Gemini request accepts first-class aspect ratio and model-aware resolution tiers', () => {
+  const flashBody = buildGeminiRequestBody({
+    publicModel: 'gemini-3.1-flash-image',
+    prompt: 'test',
+    parameters: {
+      aspect_ratio: '16:9',
+      resolution: '0.5K'
+    },
+    providerOptions: {
+      google: {
+        generationConfig: {
+          temperature: 0.7
+        }
+      }
+    }
+  });
+  assert.deepEqual(
+    (flashBody.generationConfig as Record<string, unknown>).imageConfig,
+    {
+      aspectRatio: '16:9',
+      imageSize: '512'
+    }
+  );
+
+  const proBody = buildGeminiRequestBody({
+    publicModel: 'gemini-3-pro-image-count',
+    prompt: 'test',
+    parameters: {
+      aspect_ratio: '21:9',
+      resolution: '4k'
+    }
+  });
+  assert.deepEqual(
+    (proBody.generationConfig as Record<string, unknown>).imageConfig,
+    {
+      aspectRatio: '21:9',
+      imageSize: '4K'
+    }
+  );
+
+  assert.throws(
+    () => buildGeminiRequestBody({
+      publicModel: 'gemini-3-pro-image-count',
+      prompt: 'test',
+      parameters: { resolution: '512' }
+    }),
+    (error: any) => error?.code === 'unsupported_image_resolution'
+  );
+});
+
+test('Gemini request merges unrelated public and provider image controls', () => {
+  const body = buildGeminiRequestBody({
+    publicModel: 'gemini-3.1-flash-image',
+    prompt: 'test',
+    parameters: { aspect_ratio: '4:5' },
+    providerOptions: {
+      google: {
+        generationConfig: {
+          imageConfig: { imageSize: '2K' }
+        }
+      }
+    }
+  });
+  assert.deepEqual(
+    (body.generationConfig as Record<string, unknown>).imageConfig,
+    {
+      aspectRatio: '4:5',
+      imageSize: '2K'
+    }
+  );
+
+  assert.throws(
+    () => buildGeminiRequestBody({
+      publicModel: 'gemini-3.1-flash-image',
+      prompt: 'test',
+      parameters: { resolution: '2K' },
+      providerOptions: {
+        google: {
+          generationConfig: {
+            imageConfig: { imageSize: '2K' }
           }
         }
       }

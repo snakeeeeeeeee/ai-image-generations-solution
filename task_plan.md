@@ -126,6 +126,25 @@ Completed scope: a horizontally scalable async image task execution mode for new
 - Failure severity is carried in the existing terminal consume-log snapshot and applied atomically to the original precharge row, preserving the single-row audit and fast-callback reconciliation design.
 - No new environment variables, manual mapped-model allowlists, or database fields are introduced.
 
+## Phase 17: First-class Gemini resolution and aspect ratio
+
+- [complete] Validate the provider-neutral field names and the capability boundary shared by Google Gemini and We-AI Adobe Gemini.
+- [complete] Add first-class synchronous, asynchronous JSON, and multipart resolution/aspect-ratio fields while preserving existing `size` and `provider_options`.
+- [complete] Expand Gemini resolution support and retain channel-safe ratio validation.
+- [complete] Update request fingerprints, OpenAPI, Resource Center, and supertokendoc examples.
+- [complete] Run image-handle, new-api, documentation, Docker, real Gemini, negative-validation, and GPT-Image regression verification.
+
+### Phase 17 decisions
+
+**Status:** complete
+
+- Promote resolution tier and aspect ratio to provider-neutral public output controls; reserve `provider_options` for provider-specific advanced options.
+- Keep `size` as a backward-compatible convenience mapping, but document that Gemini output pixels are not exact.
+- Treat the shared Google/We-AI capability intersection as the reliable public contract unless the user explicitly chooses a broader best-effort contract.
+- Preserve `provider_options.google.generationConfig.imageConfig` for compatibility with existing clients and the We-AI Adobe Gemini dialect.
+- Preserve the existing unified `1:1/1K` default to avoid an implicit cost increase.
+- Accept `0.5K` as a public alias and normalize it to the We-AI wire value `512`.
+
 ## Errors Encountered
 
 | Error | Attempt | Resolution |
@@ -168,3 +187,5 @@ Completed scope: a horizontally scalable async image task execution mode for new
 | GPT async diagnostic selected nonexistent `tasks.model` and `tasks.group_name` columns | 2 | Asset, consume-log, public task, and Webhook checks already supplied the required acceptance evidence; inspect the schema before any further task-table query. |
 | Mapped sync payload test reused the GPT seed-cleanup fixture and unexpectedly retained `provider_options.seed` | 1 | Restored the original GPT fixture and added a separate mapped-model payload test so the two behaviors are isolated. |
 | Broad test expectation patch changed the wrong identical `payload["model"]` assertion | 2 | Inspected both exact line contexts and updated the unmapped and mapped expectations independently. |
+| Real Gemini validation returned internal HTTP 400 but the public relay response was wrapped as generic HTTP 500 | 1 | Mark locally constructed Gemini validation errors as explicitly client-safe; controller tests prove their code/param pass through while unmarked upstream errors with the same code remain masked. |
+| Docker validation script cleanup used forbidden generic `rm -f` | 1 | No request was sent; reran with `unlink` for the two exact temporary files. |

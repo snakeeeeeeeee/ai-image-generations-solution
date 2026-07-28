@@ -1,5 +1,10 @@
 # Progress
 
+- 2026-07-28: Phase 17 implementation, docs, complete static verification, real Gemini Flash `16:9/512`, Gemini Pro async `2:3/2K`, and GPT sync/async/edit regression passed. Negative Gemini requests exposed that correct internal 400 validation errors were still wrapped as generic public 500 responses.
+- 2026-07-28: Added an explicit client-safe marker to locally constructed new-api errors and applied it only to synchronous Gemini image validation. Focused controller/relay/service/type tests pass; they prove local Gemini `unsupported_image_resolution` and `duplicate_parameter` retain HTTP 400/code/param while an unmarked upstream response using the same code remains masked.
+- 2026-07-28: Rebuilt only `new-api-dev` and completed the final Docker checks. Gemini Pro `resolution=512` returns HTTP 400 `unsupported_image_resolution` with `param=resolution`; `size + aspect_ratio` returns HTTP 400 `duplicate_parameter` with `param=size`.
+- 2026-07-28: Final real GPT regression passed after the error-classification change: synchronous `adobe-gpt-image-2-count` returned one URL and usage 15/196/211. The persisted image-handle task retained `size=1024x1024`, `quality=low`, and empty Gemini-only `resolution/aspect_ratio`.
+- 2026-07-28: Final verification passed image-handle 88/88 tests and production build, new-api `go test ./...`, web production build and OpenAPI round-trip check, supertokendoc VitePress build, and all repository diff checks. Existing frontend bundle-size/eval/browser-data advisories remain non-blocking.
 - 2026-07-28: Rebuilt `image-handle:dev` and `new-api-local:dev`, recreated the local Docker services without touching PostgreSQL/Redis volumes, and completed mapped-Gemini terminal acceptance. Public `gemini-3-pro-image-count` mapped to opaque `vendor-pro-image-v7`, succeeded with one R2-backed image and normalized usage 7/11/18; public `gemini-3.1-flash-image` mapped to a mock failing upstream, reached `failed`, refunded its precharge, and atomically changed the original log to error type 5. The temporary channel URL/mapping and mock container were removed, channel 11 was restored, and all image-handle roles remained running.
 - 2026-07-28: Started Phase 16 after production exposed mapped Gemini model rejection and the user confirmed terminal async failures should persist as error-type new-api logs. Locked a no-schema separation of public model, channel protocol, and upstream model responsibilities.
 
@@ -102,3 +107,8 @@
 - 2026-07-28: Added terminal log type snapshots and an idempotent guarded `consume -> error` update. Callback failure, timeout, missing upstream ID, and channel-read failure tests now require error logs; successful and legacy snapshots remain consume logs.
 - 2026-07-28: Package-level new-api tests pass for controller, model, relay, the image-handle task adaptor, and service. Full repository verification remains.
 - 2026-07-28: Release verification passed: image-handle `npm test` passed 86/86 and `npm run build` completed; new-api `go test ./...` passed. Only the existing Vite chunk-size advisory remains. Phase 16 is complete.
+## Phase 17
+
+- 2026-07-28: Started design validation for first-class Gemini resolution/aspect-ratio fields after comparing Google and We-AI Adobe Gemini resolution protocols.
+- 2026-07-28: Confirmed the central compatibility boundary: ten aspect ratios are shared, while Google-only extreme ratios cannot be guaranteed when the same public model may route to We-AI Adobe Gemini.
+- 2026-07-28: User approved first-class synchronous/multipart `aspect_ratio` and `resolution`, asynchronous `output.aspect_ratio` and `output.resolution`, field-level duplicate handling, and backward-compatible `size`/provider options.

@@ -125,3 +125,15 @@
 - The live worker debug log contains resolve/request/response/response-body stages with authorization and signed query values redacted; callback delivery succeeded once.
 - Final verification passed `npm test` 66/66 and `git diff --check`.
 - 2026-07-17 Webhook simplification affects no image-handle production path. Only the local third-party receiver fixture changes from timestamped HMAC verification to a user-supplied Bearer key.
+## Phase 17: Gemini resolution and ratio contract
+
+- We-AI Adobe Gemini documents `generationConfig.imageConfig.aspectRatio` and `imageSize`, with `512/1K/2K/4K`, default `2K`, and ten common aspect ratios.
+- Current image-handle accepts the same ten ratios but only `1K/2K/4K`, defaults to `1K`, and exposes exact-looking `size` aliases that map to tiers rather than guaranteed pixels.
+- Google Gemini and We-AI overlap on the ten common ratios. Google Flash additionally documents extreme ratios that We-AI does not advertise.
+- `resolution` and `aspect_ratio` are provider-neutral image concepts and are candidates for first-class public fields. Google-only controls such as thinking and safety settings remain appropriate under `provider_options`.
+- A public-model aggregate can route to different Gemini channels, so advertising Google-only ratios globally would make behavior depend on the selected channel unless channel capability metadata is introduced.
+- First-class Gemini tier interpretation is gated by the two public Gemini image models. GPT continues to retain its exact-size and existing resolution forwarding/pricing behavior.
+- Real Docker requests confirm Gemini Flash accepts `16:9 + 512` and Gemini Pro async accepts `2:3 + 2K`; actual returned dimensions are provider-selected and not guaranteed to equal tier labels exactly.
+- The relay's upstream-error masking logic classified local Gemini validation as upstream because it intentionally uses OpenAI-compatible error fields. A dedicated internal client-safe bit is safer than an error-code allowlist: only the local constructor can opt in, and an upstream provider cannot obtain passthrough by returning a matching code.
+- After rebuilding new-api, real local Docker validation preserves the intended public contract: model-aware tier failures and conflicting controls return structured HTTP 400 errors rather than generic HTTP 500.
+- The post-fix GPT request remained fully isolated from Gemini controls: the public request succeeded with normalized usage, and its executor payload stored exact GPT `size` while both Gemini-only fields remained absent.
