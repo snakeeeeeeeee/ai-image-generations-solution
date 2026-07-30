@@ -6,6 +6,11 @@ import { registerAdminRoutes, type AdminUploadFile, type AdminUploadResult } fro
 import { AdminStore } from './admin/store.js';
 import type { AdminRuntimeStats, ImageRequestRecord } from './admin/types.js';
 import { registerAsyncTaskRoutes } from './async/routes.js';
+import {
+  RedisMediaUploadSessionStore,
+  registerMediaUploadRoutes,
+  S3MediaUploadObjectStore
+} from './async/media-uploads.js';
 import { AsyncTaskStore } from './async/store.js';
 import { createQueueClients, closeQueueClients, type QueueClients } from './async/queue.js';
 import { TaskScheduler, type TaskSchedulerLike } from './async/scheduler.js';
@@ -874,6 +879,11 @@ export function buildServer(config: AppConfig, deps: ServerDeps = {}): FastifyIn
       config,
       r2Client,
       upload
+    });
+    registerMediaUploadRoutes(app, {
+      config,
+      sessions: new RedisMediaUploadSessionStore(queueClients.connection),
+      objects: new S3MediaUploadObjectStore(r2Client, config)
     });
   }
 
