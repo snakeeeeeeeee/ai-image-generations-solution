@@ -80,6 +80,11 @@ export interface AsyncTaskConfig {
   workerHeartbeatIntervalMs: number;
   workerHeartbeatTtlSeconds: number;
   taskStaleProcessingTimeoutSeconds: number;
+  adobeAsyncImageEnabled?: boolean;
+  adobeAsyncCallbackBaseUrl?: string;
+  adobeAsyncCallbackSecret?: string;
+  adobeAsyncCallbackSecretId?: string;
+  adobeAsyncPollIntervalMs?: number;
 }
 
 function requireEnv(name: string): string {
@@ -300,7 +305,12 @@ export function loadConfig(): AppConfig {
       syncWaitConcurrency: parsePositiveInt('SYNC_WAIT_CONCURRENCY', 200),
       workerHeartbeatIntervalMs: parsePositiveInt('WORKER_HEARTBEAT_INTERVAL_MS', 5000),
       workerHeartbeatTtlSeconds: parsePositiveInt('WORKER_HEARTBEAT_TTL_SECONDS', 15),
-      taskStaleProcessingTimeoutSeconds: parsePositiveInt('TASK_STALE_PROCESSING_TIMEOUT_SECONDS', 1800)
+      taskStaleProcessingTimeoutSeconds: parsePositiveInt('TASK_STALE_PROCESSING_TIMEOUT_SECONDS', 1800),
+      adobeAsyncImageEnabled: parseBooleanEnv('ADOBE_ASYNC_IMAGE_ENABLED', true),
+      adobeAsyncCallbackBaseUrl: normalizeBaseUrl(optionalEnv('ADOBE_ASYNC_CALLBACK_BASE_URL', '')),
+      adobeAsyncCallbackSecret: optionalEnv('ADOBE_ASYNC_CALLBACK_SECRET', 'local-adobe-image-callback-secret'),
+      adobeAsyncCallbackSecretId: optionalEnv('ADOBE_ASYNC_CALLBACK_SECRET_ID', 'adobe2api'),
+      adobeAsyncPollIntervalMs: parsePositiveInt('ADOBE_ASYNC_POLL_INTERVAL_MS', 30_000)
     }
   };
 

@@ -2,6 +2,9 @@ export type AsyncTaskStatus = 'submitted' | 'queued' | 'processing' | 'succeeded
 export type AsyncTaskOperation = 'generation' | 'edit';
 export type ResultDataFormat = 'url' | 'base64';
 export const PROVIDER_DIRECT_LEASE_EXECUTOR = 'provider_direct_lease';
+export const LEGACY_SYNC_DRIVER = 'legacy_sync';
+export const ADOBE_ASYNC_IMAGE_DRIVER = 'adobe2api_async_image_v1';
+export type ImageExecutionDriver = typeof LEGACY_SYNC_DRIVER | typeof ADOBE_ASYNC_IMAGE_DRIVER;
 
 export interface AsyncTaskInput {
   text?: string;
@@ -51,6 +54,17 @@ export interface AsyncTaskRecord {
   model: string;
   operation: AsyncTaskOperation;
   status: AsyncTaskStatus;
+  execution_driver?: ImageExecutionDriver;
+  upstream_task_id?: string;
+  upstream_status?: string;
+  upstream_result?: Record<string, unknown> | null;
+  upstream_sequence?: number;
+  progress?: number;
+  progress_known?: boolean;
+  progress_source?: string;
+  stage?: string;
+  upstream_last_queried_at?: string;
+  upstream_finalize_claim_until?: string;
   input: AsyncTaskInput;
   parameters: Record<string, unknown>;
   provider_options: Record<string, unknown>;

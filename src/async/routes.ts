@@ -1,3 +1,4 @@
+import { createHmac, timingSafeEqual } from 'node:crypto';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { Redis } from 'ioredis';
 import type { AppConfig } from '../config.js';
@@ -9,6 +10,10 @@ import { authorizeProviderKey, normalizeAsyncTaskRequest } from './request.js';
 import type { TaskSchedulerLike } from './scheduler.js';
 import type { AsyncTaskStore } from './store.js';
 import type { AsyncTaskRecord, AsyncTaskRequest, ResultDataFormat } from './types.js';
+import {
+  buildAdobeProgressCallbackPayload,
+  parseAdobeTaskState
+} from './adobe-driver.js';
 
 interface AsyncRoutesOptions {
   config: AppConfig;
@@ -133,6 +138,87 @@ export function registerAsyncTaskRoutes(app: FastifyInstance, options: AsyncRout
       return sendAppError(reply, error);
     }
   });
+
+  app.post('/internal/adobe/image-task-callback', async (request, reply) => {
+    try {
+      verifyAdobeCallback(request, options.config);
+      const state = parseAdobeTaskState(request.body);
+      const providerTaskId = state.clientTaskId;
+      if (!providerTaskId) {
+        throw new AppError('Async image callback is missing client_task_id', {
+          statusCode: 400,
+          type: 'invalid_request_error',
+          code: 'invalid_async_image_callback'
+        });
+      }
+      const task = await options.store.getTask(providerTaskId);
+      if (!task || task.upstream_task_id !== state.taskId) {
+        return reply.status(404).send({
+          error: {
+            message: 'Task not found',
+            type: 'invalid_request_error',
+            code: 'task_not_found'
+          }
+        });
+      }
+      const applied = await options.store.applyAdobeUpstreamUpdate(
+        providerTaskId,
+        {
+          upstreamTaskId: state.taskId,
+          sequence: state.sequence,
+          status: state.status,
+          progress: state.progress,
+          progressKnown: state.progressKnown,
+          progressSource: state.progressSource,
+          stage: state.stage,
+          result: state.result,
+          usage: state.usage,
+          error: state.error,
+          callbackPayload: buildAdobeProgressCallbackPayload(task, state)
+        }
+      );
+      if (applied.needsFinalization) {
+        await options.scheduler.wakeTask?.(providerTaskId);
+      }
+      return reply.send({
+        status: applied.accepted ? 'accepted' : 'ignored_stale',
+        provider_task_id: providerTaskId,
+        sequence: state.sequence
+      });
+    } catch (error) {
+      return sendAppError(reply, error);
+    }
+  });
+}
+
+function verifyAdobeCallback(request: FastifyRequest, config: AppConfig): void {
+  const timestamp = String(request.headers['x-adobe2api-callback-timestamp'] ?? '');
+  const signature = String(request.headers['x-adobe2api-callback-signature'] ?? '');
+  const seconds = Number.parseInt(timestamp, 10);
+  if (!Number.isFinite(seconds) || Math.abs(Math.floor(Date.now() / 1000) - seconds) > 300) {
+    throw new AppError('Async image callback timestamp is invalid', {
+      statusCode: 401,
+      type: 'invalid_request_error',
+      code: 'invalid_callback_signature'
+    });
+  }
+  const rawBody = JSON.stringify(request.body ?? {});
+  const expected = createHmac(
+    'sha256',
+    config.asyncTasks.adobeAsyncCallbackSecret || 'local-adobe-image-callback-secret'
+  ).update(`${timestamp}.${rawBody}`).digest('hex');
+  const actualBuffer = Buffer.from(signature, 'hex');
+  const expectedBuffer = Buffer.from(expected, 'hex');
+  if (
+    actualBuffer.length !== expectedBuffer.length ||
+    !timingSafeEqual(actualBuffer, expectedBuffer)
+  ) {
+    throw new AppError('Async image callback signature is invalid', {
+      statusCode: 401,
+      type: 'invalid_request_error',
+      code: 'invalid_callback_signature'
+    });
+  }
 }
 
 function withSubmissionMode(taskRequest: AsyncTaskRequest, submissionMode: 'async' | 'sync_wait'): AsyncTaskRequest {
@@ -268,12 +354,22 @@ function parseTaskIds(value: unknown): string[] {
 }
 
 export function formatTaskResponse(task: AsyncTaskRecord): Record<string, unknown> {
+  const legacyProgress = task.status === 'succeeded' || task.status === 'failed'
+    ? 100
+    : task.status === 'processing' ? 50 : 0;
+  const progress = task.execution_driver === 'adobe2api_async_image_v1' && typeof task.progress === 'number'
+    ? task.progress
+    : legacyProgress;
   return {
     task_id: task.provider_task_id,
     provider_task_id: task.provider_task_id,
     client_task_id: task.client_task_id,
     status: task.status,
-    progress: task.status === 'succeeded' || task.status === 'failed' ? '100%' : task.status === 'processing' ? '50%' : '0%',
+    progress: `${Math.round(progress)}%`,
+    progress_known: task.progress_known === true,
+    progress_source: task.progress_source || (task.progress_known ? 'upstream_percent' : 'local_status'),
+    stage: task.stage || task.status,
+    sequence: task.upstream_sequence ?? 0,
     result_data_format: 'url',
     result: task.result,
     usage: task.usage,

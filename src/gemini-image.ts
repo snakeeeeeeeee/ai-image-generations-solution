@@ -67,6 +67,7 @@ export interface GeminiCredentialLease {
   model: string;
   channel_id?: string;
   expires_at?: string;
+  execution_driver?: string;
 }
 
 function invalidRequest(message: string, code: string, param?: string): never {

@@ -15,6 +15,7 @@ interface SchedulerLogger {
 
 export interface TaskSchedulerLike {
   scheduleTask: (providerTaskId: string) => Promise<AsyncTaskRecord | undefined>;
+  wakeTask?: (providerTaskId: string) => Promise<AsyncTaskRecord | undefined>;
 }
 
 export class TaskScheduler implements TaskSchedulerLike {
@@ -68,6 +69,15 @@ export class TaskScheduler implements TaskSchedulerLike {
       await this.enqueueAssignment(assignment.task);
     }
     return assignment.task;
+  }
+
+  async wakeTask(providerTaskId: string): Promise<AsyncTaskRecord | undefined> {
+    const task = await this.store.getTask(providerTaskId);
+    if (!task?.assigned_node_id) {
+      return task;
+    }
+    await this.enqueueAssignment(task);
+    return task;
   }
 
   async reconcile(): Promise<void> {

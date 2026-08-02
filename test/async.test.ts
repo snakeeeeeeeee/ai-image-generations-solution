@@ -370,6 +370,26 @@ test('database migration adds assignment columns before their compound index', a
   await store.close();
 });
 
+test('Adobe finalization recovery includes expired processing claims and queued reassignments', async () => {
+  const store = new AsyncTaskStore('postgresql://unused');
+  const queries: string[] = [];
+  (store.pool as unknown as {
+    query: (sql: string, values?: unknown[]) => Promise<{ rows: unknown[]; rowCount: number }>;
+  }).query = async (sql: string) => {
+    queries.push(sql);
+    return { rows: [], rowCount: 0 };
+  };
+
+  await store.getQueuedTaskAssignmentsForNode('worker-1', 100);
+  await store.claimAdobeFinalization('task-1', 'worker-1', 2);
+
+  assert.match(queries[0] ?? '', /upstream_status = 'completed'/);
+  assert.match(queries[0] ?? '', /upstream_finalize_claim_until <= now\(\)/);
+  assert.match(queries[1] ?? '', /status IN \('queued', 'processing'\)/);
+  assert.match(queries[1] ?? '', /SET status = 'processing'/);
+  await store.close();
+});
+
 test('task assignment takes the scheduler advisory lock and increments assignment version', async () => {
   const store = new AsyncTaskStore('postgresql://unused');
   const now = new Date();

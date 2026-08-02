@@ -17,7 +17,7 @@ import { uploadWithRetry } from '../upload-retry.js';
 import { uploadImageToR2 } from '../r2.js';
 import { genericOpenAICompatibleStrategy } from '../image-strategy.js';
 import { loadImageSource } from '../image-runner.js';
-import { readImageMetadata } from '../image.js';
+import { buildImageKey, readImageMetadata } from '../image.js';
 import { sanitizeRawResponse } from './raw-response.js';
 import {
   buildGeminiUpstreamPayload,
@@ -36,6 +36,13 @@ import {
   writeWorkerHeartbeat,
   type WorkerRuntimeState
 } from './worker-heartbeat.js';
+import {
+  buildAdobeProgressCallbackPayload,
+  queryAdobeImageTasks,
+  shouldUseAdobeAsyncDriver,
+  submitAdobeImageTask,
+  type AdobeTaskState
+} from './adobe-driver.js';
 
 const MAX_DIRECT_EXECUTE_ATTEMPTS = 3;
 const OPENAI_PROVIDER = 'openai_compatible';
@@ -110,12 +117,34 @@ export function startAsyncWorker({
     });
   });
 
+  void recoverQueuedTasks({ nodeId, store, taskQueue }).catch((error) => {
+    worker.emit('error', error instanceof Error ? error : new Error(String(error)));
+  });
   const recoveryInterval = setInterval(() => {
     void recoverQueuedTasks({ nodeId, store, taskQueue }).catch((error) => {
       worker.emit('error', error instanceof Error ? error : new Error(String(error)));
     });
   }, 60_000);
   recoveryInterval.unref();
+  let adobeReconcileRunning = false;
+  const adobeReconcileInterval = setInterval(() => {
+    if (adobeReconcileRunning) {
+      return;
+    }
+    adobeReconcileRunning = true;
+    void reconcileAdobeTasks({
+      nodeId,
+      config,
+      store,
+      taskQueue,
+      dispatcher: upstreamDispatcher
+    }).catch((error) => {
+      worker.emit('error', error instanceof Error ? error : new Error(String(error)));
+    }).finally(() => {
+      adobeReconcileRunning = false;
+    });
+  }, config.asyncTasks.adobeAsyncPollIntervalMs ?? 30_000);
+  adobeReconcileInterval.unref();
   const heartbeatInterval = setInterval(() => {
     void writeWorkerHeartbeat({ redis, config, state: runtimeState }).catch((error) => {
       worker.emit('error', error instanceof Error ? error : new Error(String(error)));
@@ -127,6 +156,7 @@ export function startAsyncWorker({
     worker,
     close: async () => {
       clearInterval(recoveryInterval);
+      clearInterval(adobeReconcileInterval);
       clearInterval(heartbeatInterval);
       await removeWorkerHeartbeat(redis, runtimeState.workerId).catch(() => undefined);
       await worker.close();
@@ -173,11 +203,24 @@ export async function processTask({
     });
     return;
   }
-  const claimed = await store.claimTask(
-    job.data.provider_task_id,
-    workerNodeId,
-    job.data.assignment_version
+  const existing = typeof store.getTask === 'function'
+    ? await store.getTask(job.data.provider_task_id)
+    : undefined;
+  const isAdobeFinalization = (
+    existing?.execution_driver === 'adobe2api_async_image_v1' &&
+    existing.upstream_status === 'completed'
   );
+  const claimed = isAdobeFinalization
+    ? await store.claimAdobeFinalization(
+        job.data.provider_task_id,
+        workerNodeId,
+        job.data.assignment_version
+      )
+    : await store.claimTask(
+        job.data.provider_task_id,
+        workerNodeId,
+        job.data.assignment_version
+      );
   if (!claimed) {
     logAssignmentRejected({
       providerTaskId: job.data.provider_task_id,
@@ -190,6 +233,22 @@ export async function processTask({
   }
   runtimeState ? trackWorkerTaskStart(runtimeState, claimed) : undefined;
 
+  if (isAdobeFinalization) {
+    await processAdobeFinalization({
+      task: claimed,
+      config,
+      store,
+      imageProcessingLimiter,
+      dispatcher: upstreamDispatcher,
+      r2Client,
+      upload,
+      base64ResultRedis,
+      runtimeState,
+      workerNodeId
+    });
+    return;
+  }
+
   try {
     const lease = await resolveCredentialLease({ task: claimed, config, dispatcher: upstreamDispatcher });
     assertSupportedLease(lease);
@@ -201,6 +260,36 @@ export async function processTask({
 
     const releaseImageProcessing = await imageProcessingLimiter.acquire();
     try {
+      if (shouldUseAdobeAsyncDriver(claimed, lease, config)) {
+        const upstream = await submitAdobeImageTask({
+          task: claimed,
+          lease,
+          config,
+          dispatcher: upstreamDispatcher
+        });
+        const delegated = await store.markAdobeTaskAccepted({
+          providerTaskId: claimed.provider_task_id,
+          nodeId: workerNodeId,
+          assignmentVersion: claimed.assignment_version,
+          upstreamTaskId: upstream.taskId,
+          sequence: upstream.sequence,
+          status: upstream.status,
+          progress: upstream.progress,
+          progressKnown: upstream.progressKnown,
+          progressSource: upstream.progressSource,
+          stage: upstream.stage || 'upstream_processing'
+        });
+        if (!delegated) {
+          throw new AppError('Async image task acceptance could not be persisted', {
+            statusCode: 500,
+            type: 'server_error',
+            code: 'async_image_persist_failed',
+            cause: { retryable: false }
+          });
+        }
+        runtimeState ? trackWorkerTaskRetry(runtimeState, claimed.provider_task_id) : undefined;
+        return;
+      }
       const result = await executeDirectLeaseTask({
         task: claimed,
         lease,
@@ -324,6 +413,280 @@ export async function processTask({
   }
 }
 
+async function processAdobeFinalization({
+  task,
+  config,
+  store,
+  imageProcessingLimiter,
+  dispatcher,
+  r2Client,
+  upload,
+  base64ResultRedis,
+  runtimeState,
+  workerNodeId
+}: {
+  task: AsyncTaskRecord;
+  config: AppConfig;
+  store: AsyncTaskStore;
+  imageProcessingLimiter: ActiveRequestLimiter;
+  dispatcher: Agent;
+  r2Client: ReturnType<typeof createR2Client>;
+  upload: UploadImageToR2;
+  base64ResultRedis?: Redis;
+  runtimeState?: WorkerRuntimeState;
+  workerNodeId: string;
+}): Promise<void> {
+  const releaseImageProcessing = await imageProcessingLimiter.acquire();
+  try {
+    const result = await finalizeAdobeResult({
+      task,
+      config,
+      dispatcher,
+      r2Client,
+      upload
+    });
+    const resultPayload = buildResultPayload(result);
+    const safeRaw = sanitizeRawResponse(result.rawResponse, config.asyncTasks.rawResponseMaxBytes);
+    if (isBase64ResultRequested(task)) {
+      await writeBase64TaskResult(
+        base64ResultRedis,
+        task.provider_task_id,
+        task.assignment_version,
+        result.base64Result ?? extractBase64TaskResult(result.upstreamResponse)
+      );
+    }
+    const completed = await store.completeTask({
+      providerTaskId: task.provider_task_id,
+      status: 'succeeded',
+      result: {
+        ...resultPayload,
+        raw_response: safeRaw.raw_response,
+        raw_response_truncated: safeRaw.raw_response_truncated,
+        raw_response_omitted_fields: safeRaw.raw_response_omitted_fields
+      },
+      usage: result.usage,
+      error: null,
+      callbackPayload: buildCallbackPayload({
+        task,
+        status: 'succeeded',
+        result: resultPayload,
+        usage: result.usage,
+        error: null,
+        rawResponse: safeRaw
+      }),
+      nodeId: workerNodeId,
+      assignmentVersion: task.assignment_version
+    });
+    if (!completed) {
+      runtimeState ? trackWorkerTaskRetry(runtimeState, task.provider_task_id, 'stale_assignment') : undefined;
+      return;
+    }
+    runtimeState ? trackWorkerTaskFinish(runtimeState, task.provider_task_id, 'succeeded') : undefined;
+  } catch (error) {
+    const taskError = toTaskError(error);
+    const safeRaw = sanitizeRawResponse(extractCauseBody(error), config.asyncTasks.rawResponseMaxBytes);
+    await store.completeTask({
+      providerTaskId: task.provider_task_id,
+      status: 'failed',
+      result: {
+        raw_response: safeRaw.raw_response,
+        raw_response_truncated: safeRaw.raw_response_truncated,
+        raw_response_omitted_fields: safeRaw.raw_response_omitted_fields
+      },
+      usage: task.usage,
+      error: taskError,
+      callbackPayload: buildCallbackPayload({
+        task,
+        status: 'failed',
+        result: null,
+        usage: task.usage,
+        error: taskError,
+        rawResponse: safeRaw
+      }),
+      nodeId: workerNodeId,
+      assignmentVersion: task.assignment_version
+    });
+    runtimeState ? trackWorkerTaskFinish(runtimeState, task.provider_task_id, 'failed', taskError.code) : undefined;
+  } finally {
+    releaseImageProcessing();
+  }
+}
+
+async function finalizeAdobeResult({
+  task,
+  config,
+  dispatcher,
+  r2Client,
+  upload
+}: {
+  task: AsyncTaskRecord;
+  config: AppConfig;
+  dispatcher: Agent;
+  r2Client: ReturnType<typeof createR2Client>;
+  upload: UploadImageToR2;
+}): Promise<DirectExecuteResult> {
+  const upstream = safeObject(task.upstream_result);
+  const data = Array.isArray(upstream.data) ? upstream.data : [];
+  if (data.length === 0) {
+    throw new AppError('Async image task completed without result images', {
+      statusCode: 502,
+      type: 'server_error',
+      code: 'empty_upstream_data',
+      cause: { retryable: false }
+    });
+  }
+  const images: TaskResultImage[] = [];
+  for (const [index, item] of data.entries()) {
+    const url = getString(safeObject(item).url);
+    if (!url) {
+      throw new AppError('Async image result is missing a URL', {
+        statusCode: 502,
+        type: 'server_error',
+        code: 'invalid_async_image_result',
+        cause: { retryable: false }
+      });
+    }
+    const buffer = await loadImageSource({
+      source: { type: 'url', value: url },
+      config,
+      dispatcher
+    });
+    const metadata = readImageMetadata(buffer);
+    const key = buildImageKey(
+      config.r2.keyPrefix,
+      new Date(task.created_at),
+      `${task.provider_task_id}-${index + 1}`,
+      metadata.extension
+    );
+    const permanentUrl = await uploadWithRetry({
+      upload,
+      requestId: task.provider_task_id,
+      r2Client,
+      config,
+      key,
+      buffer,
+      contentType: metadata.mimeType
+    });
+    images.push({
+      url: permanentUrl,
+      mime_type: metadata.mimeType,
+      format: metadata.format,
+      width: metadata.width,
+      height: metadata.height,
+      size_bytes: metadata.bytes,
+      filename: key.split('/').pop()
+    });
+  }
+  return {
+    data: images,
+    usage: safeObject(task.usage),
+    rawResponse: upstream,
+    upstreamResponse: upstream,
+    output: buildOutputPayload(upstream),
+    metadata: { image_count: images.length }
+  };
+}
+
+async function reconcileAdobeTasks({
+  nodeId,
+  config,
+  store,
+  taskQueue,
+  dispatcher
+}: {
+  nodeId: string;
+  config: AppConfig;
+  store: AsyncTaskStore;
+  taskQueue: Queue<TaskQueuePayload>;
+  dispatcher: Agent;
+}): Promise<void> {
+  const tasks = await store.getAdobeTasksForNode(nodeId, 100);
+  const groups: Array<{
+    baseUrl: string;
+    apiKey: string;
+    tasks: AsyncTaskRecord[];
+  }> = [];
+  for (const task of tasks) {
+    try {
+      const lease = await resolveCredentialLease({ task, config, dispatcher });
+      const group = groups.find((item) => (
+        item.baseUrl === lease.base_url && item.apiKey === lease.api_key
+      ));
+      if (group) {
+        group.tasks.push(task);
+      } else {
+        groups.push({ baseUrl: lease.base_url, apiKey: lease.api_key, tasks: [task] });
+      }
+    } catch {
+      await store.touchAdobeTaskQuery(task.provider_task_id);
+    }
+  }
+  for (const group of groups) {
+    try {
+      const states = await queryAdobeImageTasks({
+        baseUrl: group.baseUrl,
+        apiKey: group.apiKey,
+        taskIds: group.tasks.map((task) => task.upstream_task_id || '').filter(Boolean),
+        dispatcher
+      });
+      const taskByUpstream = new Map(group.tasks.map((task) => [task.upstream_task_id, task]));
+      for (const rawState of states) {
+        const task = taskByUpstream.get(rawState.taskId);
+        if (!task) {
+          continue;
+        }
+        const state = normalizePolledSequence(task, rawState);
+        if (!state) {
+          await store.touchAdobeTaskQuery(task.provider_task_id);
+          continue;
+        }
+        const applied = await store.applyAdobeUpstreamUpdate(
+          task.provider_task_id,
+          {
+            upstreamTaskId: state.taskId,
+            sequence: state.sequence,
+            status: state.status,
+            progress: state.progress,
+            progressKnown: state.progressKnown,
+            progressSource: state.progressSource,
+            stage: state.stage,
+            result: state.result,
+            usage: state.usage,
+            error: state.error,
+            callbackPayload: buildAdobeProgressCallbackPayload(task, state)
+          }
+        );
+        if (applied.needsFinalization && task.assigned_node_id) {
+          await enqueueImageTask(taskQueue, {
+            provider_task_id: task.provider_task_id,
+            node_id: task.assigned_node_id,
+            assignment_version: task.assignment_version
+          }, task.attempts);
+        }
+      }
+    } catch {
+      await Promise.all(group.tasks.map((task) => store.touchAdobeTaskQuery(task.provider_task_id)));
+    }
+  }
+}
+
+export function normalizePolledSequence(
+  task: AsyncTaskRecord,
+  state: AdobeTaskState
+): AdobeTaskState | undefined {
+  const previousSequence = task.upstream_sequence ?? 0;
+  if (state.sequence > previousSequence) {
+    return state;
+  }
+  const changed = (
+    state.status !== task.upstream_status ||
+    state.progress > (task.progress ?? 0) ||
+    state.progressKnown !== (task.progress_known === true) ||
+    (state.stage || '') !== (task.stage || '')
+  );
+  return changed ? { ...state, sequence: previousSequence + 1 } : undefined;
+}
+
 async function recoverQueuedTasks({
   nodeId,
   store,
@@ -393,6 +756,10 @@ function buildCallbackPayload({
     provider_task_id: task.provider_task_id,
     status,
     progress: '100%',
+    progress_known: task.progress_known === true,
+    progress_source: task.progress_source || (task.progress_known ? 'upstream_percent' : 'terminal_status'),
+    stage: status === 'succeeded' ? 'completed' : 'failed',
+    sequence: (task.upstream_sequence ?? 0) + 1,
     result_data_format: 'url',
     result,
     usage,
@@ -906,7 +1273,8 @@ function parseCredentialLease(value: unknown): CredentialLease {
     model: requireString(body, 'model'),
     endpoint_url: getString(body.endpoint_url),
     channel_id: getString(body.channel_id),
-    expires_at: getString(body.expires_at)
+    expires_at: getString(body.expires_at),
+    execution_driver: getString(body.execution_driver)
   };
 }
 

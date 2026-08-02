@@ -29,6 +29,17 @@ interface TaskRow {
   model: string;
   operation: 'generation' | 'edit';
   status: AsyncTaskStatus;
+  execution_driver: string;
+  upstream_task_id: string | null;
+  upstream_status: string | null;
+  upstream_result_json: unknown | null;
+  upstream_sequence: number;
+  progress: number;
+  progress_known: boolean;
+  progress_source: string | null;
+  stage: string | null;
+  upstream_last_queried_at: Date | null;
+  upstream_finalize_claim_until: Date | null;
   input_json: unknown;
   parameters_json: unknown;
   provider_options_json: unknown;
@@ -159,6 +170,27 @@ export interface QueuedTaskAssignment {
   attempts: number;
 }
 
+export interface AdobeUpstreamUpdate {
+  upstreamTaskId: string;
+  sequence: number;
+  status: string;
+  progress: number;
+  progressKnown: boolean;
+  progressSource?: string;
+  stage?: string;
+  result?: Record<string, unknown> | null;
+  usage?: Record<string, unknown> | null;
+  error?: AsyncTaskError | null;
+  callbackPayload?: Record<string, unknown> | null;
+}
+
+export interface AdobeUpdateResult {
+  task?: AsyncTaskRecord;
+  accepted: boolean;
+  terminal: boolean;
+  needsFinalization: boolean;
+}
+
 export class AsyncTaskStore {
   readonly pool: pg.Pool;
 
@@ -188,6 +220,17 @@ export class AsyncTaskStore {
           model TEXT NOT NULL,
           operation TEXT NOT NULL,
           status TEXT NOT NULL,
+          execution_driver TEXT NOT NULL DEFAULT 'legacy_sync',
+          upstream_task_id TEXT,
+          upstream_status TEXT,
+          upstream_result_json JSONB,
+          upstream_sequence INTEGER NOT NULL DEFAULT 0,
+          progress INTEGER NOT NULL DEFAULT 0,
+          progress_known BOOLEAN NOT NULL DEFAULT false,
+          progress_source TEXT,
+          stage TEXT,
+          upstream_last_queried_at TIMESTAMPTZ,
+          upstream_finalize_claim_until TIMESTAMPTZ,
           input_json JSONB NOT NULL DEFAULT '{}'::jsonb,
           parameters_json JSONB NOT NULL DEFAULT '{}'::jsonb,
           provider_options_json JSONB NOT NULL DEFAULT '{}'::jsonb,
@@ -256,6 +299,24 @@ export class AsyncTaskStore {
       await client.query(`
         ALTER TABLE image_tasks
           ADD COLUMN IF NOT EXISTS assignment_version INTEGER NOT NULL DEFAULT 0
+      `);
+      await client.query(`
+        ALTER TABLE image_tasks
+          ADD COLUMN IF NOT EXISTS execution_driver TEXT NOT NULL DEFAULT 'legacy_sync',
+          ADD COLUMN IF NOT EXISTS upstream_task_id TEXT,
+          ADD COLUMN IF NOT EXISTS upstream_status TEXT,
+          ADD COLUMN IF NOT EXISTS upstream_result_json JSONB,
+          ADD COLUMN IF NOT EXISTS upstream_sequence INTEGER NOT NULL DEFAULT 0,
+          ADD COLUMN IF NOT EXISTS progress INTEGER NOT NULL DEFAULT 0,
+          ADD COLUMN IF NOT EXISTS progress_known BOOLEAN NOT NULL DEFAULT false,
+          ADD COLUMN IF NOT EXISTS progress_source TEXT,
+          ADD COLUMN IF NOT EXISTS stage TEXT,
+          ADD COLUMN IF NOT EXISTS upstream_last_queried_at TIMESTAMPTZ,
+          ADD COLUMN IF NOT EXISTS upstream_finalize_claim_until TIMESTAMPTZ
+      `);
+      await client.query(`
+        CREATE INDEX IF NOT EXISTS idx_image_tasks_adobe_upstream
+          ON image_tasks(execution_driver, status, upstream_status, updated_at)
       `);
       await client.query(`
         CREATE INDEX IF NOT EXISTS idx_image_tasks_status_node_updated_at
@@ -370,6 +431,203 @@ export class AsyncTaskStore {
     return result.rows[0] ? mapTaskRow(result.rows[0]) : undefined;
   }
 
+  async markAdobeTaskAccepted({
+    providerTaskId,
+    nodeId,
+    assignmentVersion,
+    upstreamTaskId,
+    sequence,
+    status,
+    progress,
+    progressKnown,
+    progressSource,
+    stage
+  }: {
+    providerTaskId: string;
+    nodeId: string;
+    assignmentVersion: number;
+    upstreamTaskId: string;
+    sequence: number;
+    status: string;
+    progress: number;
+    progressKnown: boolean;
+    progressSource?: string;
+    stage?: string;
+  }): Promise<AsyncTaskRecord | undefined> {
+    const result = await this.pool.query<TaskRow>(`
+      UPDATE image_tasks
+      SET execution_driver = 'adobe2api_async_image_v1',
+          upstream_task_id = $4,
+          upstream_status = $5,
+          upstream_sequence = GREATEST(upstream_sequence, $6),
+          progress = GREATEST(progress, $7),
+          progress_known = progress_known OR $8,
+          progress_source = COALESCE($9, progress_source),
+          stage = COALESCE($10, 'upstream_processing'),
+          error_json = NULL,
+          updated_at = now()
+      WHERE provider_task_id = $1
+        AND status = 'processing'
+        AND assigned_node_id = $2
+        AND assignment_version = $3
+        AND (upstream_task_id IS NULL OR upstream_task_id = $4)
+      RETURNING *
+    `, [
+      providerTaskId,
+      nodeId,
+      assignmentVersion,
+      upstreamTaskId,
+      status,
+      Math.max(0, sequence),
+      Math.max(0, Math.min(100, progress)),
+      progressKnown,
+      progressSource ?? null,
+      stage ?? null
+    ]);
+    return result.rows[0] ? mapTaskRow(result.rows[0]) : undefined;
+  }
+
+  async applyAdobeUpstreamUpdate(
+    providerTaskId: string,
+    update: AdobeUpstreamUpdate
+  ): Promise<AdobeUpdateResult> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const selected = await client.query<TaskRow>(`
+        SELECT * FROM image_tasks WHERE provider_task_id = $1 FOR UPDATE
+      `, [providerTaskId]);
+      const row = selected.rows[0];
+      if (
+        !row ||
+        row.execution_driver !== 'adobe2api_async_image_v1' ||
+        row.status !== 'processing' ||
+        row.upstream_task_id !== update.upstreamTaskId ||
+        update.sequence <= row.upstream_sequence
+      ) {
+        await client.query('COMMIT');
+        return { task: row ? mapTaskRow(row) : undefined, accepted: false, terminal: false, needsFinalization: false };
+      }
+
+      const normalizedStatus = update.status.trim().toLowerCase();
+      const succeeded = normalizedStatus === 'completed';
+      const failed = normalizedStatus === 'failed' || normalizedStatus === 'submission_unknown';
+      const nextTaskStatus: AsyncTaskStatus = failed ? 'failed' : 'processing';
+      const nextStage = update.stage || (succeeded ? 'finalizing' : failed ? 'failed' : 'upstream_processing');
+      const updated = await client.query<TaskRow>(`
+        UPDATE image_tasks
+        SET status = $2,
+            upstream_status = $3,
+            upstream_result_json = COALESCE($4, upstream_result_json),
+            upstream_sequence = $5,
+            progress = CASE WHEN $11::boolean THEN 100 ELSE GREATEST(progress, $6) END,
+            progress_known = progress_known OR $7,
+            progress_source = COALESCE($8, progress_source),
+            stage = $9,
+            usage_json = COALESCE($10, usage_json),
+            error_json = CASE WHEN $11::boolean THEN $12 ELSE error_json END,
+            finished_at = CASE WHEN $11::boolean THEN now() ELSE finished_at END,
+            upstream_last_queried_at = now(),
+            updated_at = now()
+        WHERE provider_task_id = $1
+        RETURNING *
+      `, [
+        providerTaskId,
+        nextTaskStatus,
+        normalizedStatus,
+        update.result ?? null,
+        update.sequence,
+        Math.max(0, Math.min(100, update.progress)),
+        update.progressKnown,
+        update.progressSource ?? null,
+        nextStage,
+        update.usage ?? null,
+        failed,
+        update.error ?? null
+      ]);
+      const updatedRow = updated.rows[0];
+      if (updatedRow && update.callbackPayload) {
+        const callback = safeObject(updatedRow.callback_json) as AsyncTaskCallback;
+        if (typeof callback.url === 'string' && callback.url.trim() !== '') {
+          if (!failed) {
+            await client.query(`
+              DELETE FROM callback_events
+              WHERE provider_task_id = $1
+                AND status = 'pending'
+                AND COALESCE(payload_json->>'status', '') NOT IN ('succeeded', 'failed')
+            `, [providerTaskId]);
+          }
+          await this.insertCallbackEvent(client, {
+            task: updatedRow,
+            callback,
+            payload: update.callbackPayload
+          });
+        }
+      }
+      await client.query('COMMIT');
+      return {
+        task: updatedRow ? mapTaskRow(updatedRow) : undefined,
+        accepted: Boolean(updatedRow),
+        terminal: failed,
+        needsFinalization: succeeded
+      };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async claimAdobeFinalization(
+    providerTaskId: string,
+    nodeId: string,
+    assignmentVersion: number,
+    claimSeconds = 300
+  ): Promise<AsyncTaskRecord | undefined> {
+    const result = await this.pool.query<TaskRow>(`
+      UPDATE image_tasks
+      SET status = 'processing',
+          stage = 'finalizing',
+          upstream_finalize_claim_until = now() + ($4::int * interval '1 second'),
+          updated_at = now()
+      WHERE provider_task_id = $1
+        AND status IN ('queued', 'processing')
+        AND execution_driver = 'adobe2api_async_image_v1'
+        AND upstream_status = 'completed'
+        AND assigned_node_id = $2
+        AND assignment_version = $3
+        AND (
+          upstream_finalize_claim_until IS NULL
+          OR upstream_finalize_claim_until <= now()
+        )
+      RETURNING *
+    `, [providerTaskId, nodeId, assignmentVersion, claimSeconds]);
+    return result.rows[0] ? mapTaskRow(result.rows[0]) : undefined;
+  }
+
+  async getAdobeTasksForNode(nodeId: string, limit: number): Promise<AsyncTaskRecord[]> {
+    const result = await this.pool.query<TaskRow>(`
+      SELECT *
+      FROM image_tasks
+      WHERE status = 'processing'
+        AND execution_driver = 'adobe2api_async_image_v1'
+        AND upstream_task_id IS NOT NULL
+        AND upstream_status NOT IN ('completed', 'failed', 'submission_unknown')
+        AND assigned_node_id = $1
+      ORDER BY COALESCE(upstream_last_queried_at, started_at, created_at) ASC
+      LIMIT $2
+    `, [nodeId, Math.max(1, Math.min(100, limit))]);
+    return result.rows.map(mapTaskRow);
+  }
+
+  async touchAdobeTaskQuery(providerTaskId: string): Promise<void> {
+    await this.pool.query(`
+      UPDATE image_tasks SET upstream_last_queried_at = now(), updated_at = now()
+      WHERE provider_task_id = $1 AND execution_driver = 'adobe2api_async_image_v1'
+    `, [providerTaskId]);
+  }
+
   async completeTask({
     providerTaskId,
     status,
@@ -398,6 +656,8 @@ export class AsyncTaskStore {
             result_json = $3,
             usage_json = $4,
             error_json = $5,
+            progress = 100,
+            stage = CASE WHEN $2 = 'succeeded' THEN 'completed' ELSE 'failed' END,
             finished_at = now(),
             updated_at = now()
         WHERE provider_task_id = $1
@@ -438,6 +698,7 @@ export class AsyncTaskStore {
     const result = await this.pool.query<{ provider_task_id: string }>(`
       UPDATE image_tasks
       SET status = 'queued',
+          stage = 'queued',
           error_json = $2,
           updated_at = now()
       WHERE provider_task_id = $1
@@ -592,8 +853,19 @@ export class AsyncTaskStore {
     const result = await this.pool.query<QueuedTaskAssignment>(`
       SELECT provider_task_id, assigned_node_id, assignment_version, attempts
       FROM image_tasks
-      WHERE status = 'queued'
-        AND assigned_node_id = $1
+      WHERE assigned_node_id = $1
+        AND (
+          status = 'queued'
+          OR (
+            status = 'processing'
+            AND execution_driver = 'adobe2api_async_image_v1'
+            AND upstream_status = 'completed'
+            AND (
+              upstream_finalize_claim_until IS NULL
+              OR upstream_finalize_claim_until <= now()
+            )
+          )
+        )
       ORDER BY updated_at ASC
       LIMIT $2
     `, [nodeId, limit]);
@@ -883,6 +1155,19 @@ function mapTaskRow(row: TaskRow): AsyncTaskRecord {
     model: row.model,
     operation: row.operation,
     status: row.status,
+    execution_driver: row.execution_driver === 'adobe2api_async_image_v1'
+      ? 'adobe2api_async_image_v1'
+      : 'legacy_sync',
+    upstream_task_id: row.upstream_task_id ?? undefined,
+    upstream_status: row.upstream_status ?? undefined,
+    upstream_result: row.upstream_result_json ? safeObject(row.upstream_result_json) : null,
+    upstream_sequence: row.upstream_sequence ?? 0,
+    progress: row.progress ?? 0,
+    progress_known: Boolean(row.progress_known),
+    progress_source: row.progress_source ?? undefined,
+    stage: row.stage ?? undefined,
+    upstream_last_queried_at: dateToIso(row.upstream_last_queried_at),
+    upstream_finalize_claim_until: dateToIso(row.upstream_finalize_claim_until),
     input: safeObject(row.input_json),
     parameters: safeObject(row.parameters_json),
     provider_options: safeObject(row.provider_options_json),
