@@ -536,6 +536,7 @@ async function finalizeAdobeResult({
     });
   }
   const images: TaskResultImage[] = [];
+  const base64Images: Array<{ b64_json: string; mime_type?: string }> = [];
   for (const [index, item] of data.entries()) {
     const url = getString(safeObject(item).url);
     if (!url) {
@@ -552,6 +553,12 @@ async function finalizeAdobeResult({
       dispatcher
     });
     const metadata = readImageMetadata(buffer);
+    if (isBase64ResultRequested(task)) {
+      base64Images.push({
+        b64_json: buffer.toString('base64'),
+        mime_type: metadata.mimeType
+      });
+    }
     const key = buildImageKey(
       config.r2.keyPrefix,
       new Date(task.created_at),
@@ -583,7 +590,10 @@ async function finalizeAdobeResult({
     rawResponse: upstream,
     upstreamResponse: upstream,
     output: buildOutputPayload(upstream),
-    metadata: { image_count: images.length }
+    metadata: { image_count: images.length },
+    base64Result: isBase64ResultRequested(task)
+      ? extractBase64TaskResult({ data: base64Images })
+      : undefined
   };
 }
 
@@ -832,8 +842,52 @@ async function executeDirectLeaseTask({
     rawResponse: rewriteRawResponseImages(execution.upstreamResponse, execution.data),
     upstreamResponse: execution.upstreamResponse,
     output: buildOutputPayload(execution.upstreamResponse),
-    metadata: buildExecutionMetadata({ task, execution })
+    metadata: buildExecutionMetadata({ task, execution }),
+    base64Result: isBase64ResultRequested(task)
+      ? await materializeBase64Result(execution.upstreamResponse, directConfig, dispatcher)
+      : undefined
   };
+}
+
+async function materializeBase64Result(
+  upstreamResponse: unknown,
+  config: AppConfig,
+  dispatcher: UpstreamDispatcher
+): Promise<NonNullable<DirectExecuteResult['base64Result']>> {
+  const response = safeObject(upstreamResponse);
+  const data = Array.isArray(response.data) ? response.data : [];
+  const materialized = [];
+  for (const item of data) {
+    const image = safeObject(item);
+    const existing = getString(image.b64_json);
+    if (existing) {
+      materialized.push({
+        b64_json: existing,
+        mime_type: getString(image.mime_type) ?? getString(image.mimeType)
+      });
+      continue;
+    }
+    const url = getString(image.url);
+    if (!url) {
+      throw new AppError('Upstream response did not include an image URL for base64 result', {
+        statusCode: 502,
+        type: 'server_error',
+        code: 'missing_base64_result',
+        cause: { retryable: false }
+      });
+    }
+    const buffer = await loadImageSource({
+      source: { type: 'url', value: url },
+      config,
+      dispatcher
+    });
+    const metadata = readImageMetadata(buffer);
+    materialized.push({
+      b64_json: buffer.toString('base64'),
+      mime_type: metadata.mimeType
+    });
+  }
+  return extractBase64TaskResult({ data: materialized });
 }
 
 async function executeGeminiLeaseTask({
@@ -1118,6 +1172,7 @@ async function buildEditPayloadFromUrls({
 function buildOpenAICompatibleBody(task: AsyncTaskRecord, lease: CredentialLease): Record<string, unknown> {
   return {
     ...task.parameters,
+    ...(lease.execution_driver === 'adobe2api_async_image_v1' ? { response_format: 'url' } : {}),
     model: lease.model || task.model,
     prompt: task.input.text
   };

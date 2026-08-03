@@ -1468,6 +1468,7 @@ test('worker detects edit input URL MIME before forwarding multipart upstream', 
   upstream.post('/api/internal/image/credential-leases/lease_1/resolve', async () => ({
     provider: 'openai_compatible',
     request_format: 'openai_images',
+    execution_driver: 'adobe2api_async_image_v1',
     base_url: upstreamBaseUrl,
     api_key: 'sk-secret-upstream',
     model: 'gpt-image-2',
@@ -1481,6 +1482,10 @@ test('worker detects edit input URL MIME before forwarding multipart upstream', 
 
   upstream.get('/mask.png', async (_request, reply) => reply
     .header('content-type', 'application/octet-stream')
+    .send(Buffer.from(tinyPngBase64, 'base64')));
+
+  upstream.get('/output.png', async (_request, reply) => reply
+    .header('content-type', 'image/png')
     .send(Buffer.from(tinyPngBase64, 'base64')));
 
   upstream.post('/images/edits', async (request) => {
@@ -1505,7 +1510,7 @@ test('worker detects edit input URL MIME before forwarding multipart upstream', 
       resolution: '4k',
       data: [
         {
-          b64_json: tinyPngBase64
+          url: `${upstreamBaseUrl}/output.png`
         }
       ]
     };
@@ -1530,6 +1535,10 @@ test('worker detects edit input URL MIME before forwarding multipart upstream', 
       resolution: '4k',
       n: 3
     },
+    metadata: {
+      result_data_format: 'base64',
+      submission_mode: 'sync_wait'
+    },
     executor: {
       type: 'provider_direct_lease',
       lease_id: 'lease_1',
@@ -1549,6 +1558,13 @@ test('worker detects edit input URL MIME before forwarding multipart upstream', 
   const rateLimiter = { waitForToken: async () => undefined };
   const limiter = { acquire: async () => () => undefined };
   const upload = async () => 'https://img.example.com/images/out.png';
+  const cached = new Map<string, string>();
+  const redis = {
+    set: async (key: string, value: string) => {
+      cached.set(key, value);
+      return 'OK';
+    }
+  };
   const dispatcher = new (await import('undici')).Agent();
 
   try {
@@ -1569,6 +1585,7 @@ test('worker detects edit input URL MIME before forwarding multipart upstream', 
       imageProcessingLimiter: limiter as never,
       upstreamDispatcher: dispatcher,
       r2Client: {} as never,
+      base64ResultRedis: redis as never,
       upload
     });
   } finally {
@@ -1607,9 +1624,15 @@ test('worker detects edit input URL MIME before forwarding multipart upstream', 
     quality: 'medium',
     resolution: '4k',
     n: '3',
+    response_format: 'url',
     model: 'gpt-image-2',
     prompt: 'edit'
   });
+  const cachedValue = cached.get('image-task:base64-result:imgtask_1:v1');
+  assert.ok(cachedValue);
+  const cachedBody = JSON.parse(cachedValue) as { result: { images: Array<{ b64_json: string; mime_type?: string }> } };
+  assert.equal(cachedBody.result.images[0]?.b64_json, tinyPngBase64);
+  assert.equal(cachedBody.result.images[0]?.mime_type, 'image/png');
 });
 
 test('worker writes requested base64 result to Redis only', async () => {

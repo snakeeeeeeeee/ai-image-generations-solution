@@ -37,9 +37,6 @@ export function shouldUseAdobeAsyncDriver(
   if (lease.execution_driver !== ADOBE_ASYNC_IMAGE_DRIVER || task.operation !== 'generation') {
     return false;
   }
-  if (task.metadata.result_data_format === 'base64') {
-    return false;
-  }
   const count = Number(task.parameters.n ?? 1);
   return Number.isSafeInteger(count) && count === 1;
 }

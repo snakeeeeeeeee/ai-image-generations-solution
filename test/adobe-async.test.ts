@@ -75,7 +75,7 @@ test('Adobe async driver is strictly opt-in and safely falls back', () => {
   ), false);
   assert.equal(shouldUseAdobeAsyncDriver(
     buildTask({ metadata: { result_data_format: 'base64' } }), lease, config()
-  ), false);
+  ), true);
   assert.equal(shouldUseAdobeAsyncDriver(
     buildTask(), { ...lease, execution_driver: 'legacy_sync' }, config()
   ), false);
